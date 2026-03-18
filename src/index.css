@@ -1,8 +1,16 @@
 @import "tailwindcss";
+@import "mobile-drag-drop/default.css";
+@plugin "@tailwindcss/typography";
 
 @theme {
   --font-sans: "Plus Jakarta Sans", ui-sans-serif, system-ui, sans-serif;
   --font-serif: "Fraunces", ui-serif, Georgia, serif;
+}
+
+@layer base {
+  .prose mark {
+    @apply bg-yellow-200 text-yellow-900 px-1 rounded-sm;
+  }
 }
 
 @layer utilities {
@@ -19,6 +27,14 @@
   }
   .custom-scrollbar::-webkit-scrollbar-thumb:hover {
     background: #9ca3af;
+  }
+
+  .scrollbar-hide::-webkit-scrollbar {
+    display: none;
+  }
+  .scrollbar-hide {
+    -ms-overflow-style: none;
+    scrollbar-width: none;
   }
 
   .animate-fade-in {

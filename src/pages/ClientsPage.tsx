@@ -1,18 +1,23 @@
 import React, { useState } from 'react';
 import { useApp } from '../context/AppContext';
 import { useToast } from '../context/ToastContext';
-import { Plus, Search, Edit2, Trash2, ChevronLeft, Users, GitMerge } from 'lucide-react';
+import { useConfirm } from '../context/ConfirmContext';
+import { Plus, Search, Edit2, Trash2, ChevronLeft, Users, GitMerge, CheckCircle2, Clock, AlertCircle } from 'lucide-react';
 import { Modal } from '../components/ui/Modal';
 import { Toggle } from '../components/ui/Toggle';
 import { TypeChip, StatusBadge } from '../components/ui/Badges';
 import { Avatar } from '../components/ui/Avatar';
 import { TaskModal } from '../components/ui/TaskModal';
-import { genId, fmt, today, daysLeft, TYPE_COLORS } from '../utils';
+import { genUUID, fmt, today, daysLeft, TYPE_COLORS } from '../utils';
 import { Client, Task } from '../types';
+import { Pagination } from '../components/ui/Pagination';
+import { PageHeader } from '../components/ui/PageHeader';
+import { Coachmark } from '../components/ui/Coachmark';
 
 export function ClientsPage() {
-  const { clients, setClients, users, tasks } = useApp();
+  const { clients, users, tasks, currentUser, addClient, updateClient, deleteClient, addTask, addTasks } = useApp();
   const toast = useToast();
+  const { confirm } = useConfirm();
 
   const [search, setSearch] = useState('');
   const [filter, setFilter] = useState('');
@@ -21,6 +26,9 @@ export function ClientsPage() {
   const [selected, setSelected] = useState<Client | null>(null);
   const [editingTask, setEditingTask] = useState<Task | null>(null);
   const [isTaskModalOpen, setIsTaskModalOpen] = useState(false);
+  
+  const [currentPage, setCurrentPage] = useState(1);
+  const itemsPerPage = 8;
 
   const openEditTask = (task: Task) => {
     setEditingTask(task);
@@ -35,8 +43,10 @@ export function ClientsPage() {
     (!filter || c.category === filter)
   );
 
+  const paginatedClients = filtered.slice((currentPage - 1) * itemsPerPage, currentPage * itemsPerPage);
+
   const openNew = () => {
-    setForm({ id: genId(), name: '', pan: '', gstin: '', category: 'Pvt Ltd', services: [], manager: 'u1', email: '', phone: '', address: '', onboarded: fmt(today), active: true });
+    setForm({ id: genUUID(), name: '', pan: '', gstin: '', category: 'Pvt Ltd', services: [], manager: currentUser?.id || 'u1', email: '', phone: '', address: '', onboarded: fmt(today), active: true });
     setModal('form');
   };
   
@@ -45,22 +55,86 @@ export function ClientsPage() {
     setModal('form');
   };
 
-  const save = () => {
+  const save = async () => {
     if (!form?.name || !form?.pan) { toast('Name and PAN are required', 'error'); return; }
-    if (clients.find(c => c.id === form.id)) {
-      setClients(c => c.map(x => x.id === form.id ? form : x));
-    } else {
-      setClients(c => [...c, form]);
+    try {
+      const isNew = !clients.find(c => c.id === form.id);
+      if (!isNew) {
+        await updateClient(form.id, form);
+      } else {
+        await addClient(form);
+        
+        // Auto-create tasks based on services
+        const newTasks: Task[] = [];
+        form.services.forEach(service => {
+          const parentId = genUUID();
+          newTasks.push({
+            id: parentId,
+            title: `Initial Setup & Compliance for ${service}`,
+            clientId: form.id,
+            type: service,
+            status: 'To Do',
+            priority: 'High',
+            assigneeId: form.manager,
+            reviewerId: '',
+            dueDate: fmt(new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)), // 7 days from now
+            createdAt: fmt(today),
+            recurring: 'Monthly',
+            description: `Auto-generated task for ${service} compliance. Please review and set up necessary documents.`,
+            tags: ['auto-generated', 'onboarding'],
+            subtasks: [],
+            comments: [],
+            attachments: [],
+            activity: [{ text: 'Task auto-created during client onboarding', at: fmt(today) }]
+          });
+          
+          const subtaskTitles = ['Collect necessary documents', 'Verify credentials', 'Setup portal access'];
+          subtaskTitles.forEach(title => {
+            newTasks.push({
+              id: genUUID(),
+              parentId: parentId,
+              issueType: 'Subtask',
+              title: title,
+              clientId: form.id,
+              type: service,
+              status: 'To Do',
+              priority: 'Medium',
+              assigneeId: form.manager,
+              reviewerId: '',
+              dueDate: fmt(new Date(Date.now() + 7 * 24 * 60 * 60 * 1000)),
+              createdAt: fmt(today),
+              recurring: 'One-time',
+              description: '',
+              tags: [],
+              subtasks: [],
+              comments: [],
+              attachments: [],
+              activity: []
+            });
+          });
+        });
+        
+        // Add all new tasks
+        await addTasks(newTasks);
+      }
+      toast(isNew ? 'Client saved and tasks auto-generated' : 'Client updated', 'success');
+      setModal(null);
+      setForm(null);
+    } catch (error) {
+      console.error('Error saving client:', error);
+      toast('Failed to save client', 'error');
     }
-    toast('Client saved', 'success');
-    setModal(null);
-    setForm(null);
   };
 
-  const del = (id: string) => {
-    if (confirm('Delete client?')) {
-      setClients(c => c.filter(x => x.id !== id));
-      toast('Client deleted');
+  const del = async (id: string) => {
+    if (await confirm({ title: 'Delete Client', message: 'Are you sure you want to delete this client?', danger: true })) {
+      try {
+        await deleteClient(id);
+        toast('Client deleted', 'success');
+      } catch (error) {
+        console.error('Error deleting client:', error);
+        toast('Failed to delete client', 'error');
+      }
     }
   };
 
@@ -73,6 +147,14 @@ export function ClientsPage() {
     const mgr = users.find(u => u.id === c.manager);
     const ct = tasks.filter(t => t.clientId === c.id);
     const active_t = ct.filter(t => t.status !== 'Completed');
+    
+    const currentMonth = new Date().getMonth();
+    const currentYear = new Date().getFullYear();
+
+    const isCurrentMonth = (dateStr: string) => {
+      const d = new Date(dateStr);
+      return d.getMonth() === currentMonth && d.getFullYear() === currentYear;
+    };
     
     return (
       <div className="animate-slide-up">
@@ -130,7 +212,9 @@ export function ClientsPage() {
           <div className="px-5 py-4 border-b border-gray-200">
             <h3 className="font-semibold text-[15px] text-gray-900">Task History</h3>
           </div>
-          <div className="overflow-x-auto">
+          
+          {/* Desktop Table View */}
+          <div className="hidden md:block overflow-x-auto">
             <table className="w-full border-collapse text-left">
               <thead>
                 <tr className="bg-gray-50 border-b border-gray-200">
@@ -153,12 +237,14 @@ export function ClientsPage() {
                 )}
                 {ct.map(t => {
                   const a = users.find(u => u.id === t.assigneeId);
+                  const relevant = isCurrentMonth(t.dueDate);
                   return (
-                    <tr key={t.id} className="border-b border-gray-100 hover:bg-gray-50 transition-colors cursor-pointer" onClick={() => openEditTask(t)}>
+                    <tr key={t.id} className={`border-b border-gray-100 hover:bg-gray-50 transition-colors cursor-pointer ${!relevant ? 'opacity-40 grayscale-[0.5]' : ''}`} onClick={() => openEditTask(t)}>
                       <td className="px-4 py-3">
                         <div className="flex items-center gap-2">
                           <span className="text-[10px] font-mono text-gray-400">#{t.id}</span>
                           <span className="font-medium text-blue-600 hover:underline">{t.title}</span>
+                          {!relevant && <span className="text-[10px] bg-gray-100 text-gray-400 px-1.5 py-0.5 rounded font-bold uppercase tracking-tighter">Future/Past</span>}
                           {t.subtasks && t.subtasks.length > 0 && (
                             <div className="flex items-center gap-1 text-[10px] text-gray-400 bg-gray-100 px-1.5 py-0.5 rounded shrink-0" title={`${t.subtasks.filter(s => s.done).length}/${t.subtasks.length} subtasks done`}>
                               <GitMerge size={10} />
@@ -182,6 +268,42 @@ export function ClientsPage() {
               </tbody>
             </table>
           </div>
+
+          {/* Mobile Card View */}
+          <div className="md:hidden divide-y divide-gray-100">
+            {ct.length === 0 && (
+              <div className="flex flex-col items-center justify-center p-8 text-gray-500">
+                <p>No tasks for this client.</p>
+              </div>
+            )}
+            {ct.map(t => {
+              const a = users.find(u => u.id === t.assigneeId);
+              const relevant = isCurrentMonth(t.dueDate);
+              return (
+                <div key={t.id} className={`p-4 hover:bg-gray-50 transition-colors ${!relevant ? 'opacity-40 grayscale-[0.5]' : ''}`} onClick={() => openEditTask(t)}>
+                  <div className="flex justify-between items-start mb-2">
+                    <div className="flex items-center gap-2">
+                      <span className="text-[10px] font-mono text-gray-400">#{t.id}</span>
+                      <div className="font-bold text-[13px] text-blue-600">{t.title}</div>
+                      {!relevant && <span className="text-[9px] bg-gray-100 text-gray-400 px-1 py-0.5 rounded font-bold uppercase">Future/Past</span>}
+                    </div>
+                    <StatusBadge status={t.status} />
+                  </div>
+                  
+                  <div className="flex items-center justify-between mt-3">
+                    <div className="flex items-center gap-2">
+                      <TypeChip type={t.type} />
+                      <span className="text-[11px] text-gray-500">{new Date(t.dueDate).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}</span>
+                    </div>
+                    <div className="flex items-center gap-1.5">
+                      <Avatar user={a} size={18} />
+                      <span className="text-[11px] text-gray-600">{a?.name?.split(' ')[0] || '—'}</span>
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
         </div>
 
         {isTaskModalOpen && (
@@ -196,17 +318,17 @@ export function ClientsPage() {
 
   return (
     <div className="animate-slide-up">
-      <div className="flex items-start gap-3 mb-5">
-        <div className="flex-1">
-          <h1 className="font-serif text-[22px] font-semibold text-gray-900">Client Management</h1>
-          <p className="text-[13px] text-gray-500 mt-0.5">{clients.length} clients</p>
-        </div>
-        <button className="bg-blue-600 hover:bg-blue-700 text-white px-3.5 py-2 rounded-lg text-[13px] font-medium flex items-center gap-1.5 transition-colors" onClick={openNew}>
-          <Plus size={15} /> Add Client
-        </button>
-      </div>
+      <PageHeader 
+        title="Clients" 
+        description="Manage your client portfolio and their compliance status."
+        action={
+          <button id="add-client-btn" className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2.5 rounded-xl text-[14px] font-bold flex items-center gap-2 transition-all shadow-lg shadow-blue-200" onClick={openNew}>
+            <Plus size={18} /> Add Client
+          </button>
+        }
+      />
 
-      <div className="flex gap-2 items-center flex-wrap mb-5">
+      <div className="flex gap-2 items-center flex-wrap mb-6">
         <div className="flex items-center gap-2 bg-white border border-gray-200 rounded-lg px-3 py-1.5 w-[260px] focus-within:border-blue-600 transition-colors">
           <Search size={14} className="text-gray-400 shrink-0" />
           <input 
@@ -222,70 +344,151 @@ export function ClientsPage() {
         </select>
       </div>
 
-      <div className="bg-white border border-gray-200 rounded-xl overflow-x-auto">
-        <table className="w-full border-collapse text-left">
-          <thead>
-            <tr className="bg-gray-50 border-b border-gray-200">
-              <th className="px-4 py-3 text-[11px] font-bold text-gray-500 uppercase tracking-wider">Client</th>
-              <th className="px-4 py-3 text-[11px] font-bold text-gray-500 uppercase tracking-wider">Category</th>
-              <th className="px-4 py-3 text-[11px] font-bold text-gray-500 uppercase tracking-wider">PAN</th>
-              <th className="px-4 py-3 text-[11px] font-bold text-gray-500 uppercase tracking-wider">GSTIN</th>
-              <th className="px-4 py-3 text-[11px] font-bold text-gray-500 uppercase tracking-wider">Services</th>
-              <th className="px-4 py-3 text-[11px] font-bold text-gray-500 uppercase tracking-wider">Manager</th>
-              <th className="px-4 py-3 text-[11px] font-bold text-gray-500 uppercase tracking-wider">Status</th>
-              <th className="px-4 py-3 text-[11px] font-bold text-gray-500 uppercase tracking-wider">Actions</th>
-            </tr>
-          </thead>
-          <tbody className="text-[13px] text-gray-700">
-            {filtered.length === 0 && (
-              <tr>
-                <td colSpan={8}>
-                  <div className="flex flex-col items-center justify-center p-12 text-gray-500 gap-3">
-                    <Users size={32} className="opacity-30" />
-                    <h3 className="font-semibold text-gray-700 text-[15px]">No clients found</h3>
-                  </div>
-                </td>
+      <div className="bg-white border border-gray-200 rounded-xl overflow-hidden shadow-sm">
+        {/* Desktop Table View */}
+        <div className="hidden md:block overflow-x-auto">
+          <table className="w-full border-collapse text-left">
+            <thead>
+              <tr className="bg-gray-50 border-b border-gray-200">
+                <th className="px-4 py-3 text-[11px] font-bold text-gray-500 uppercase tracking-wider">Client</th>
+                <th className="px-4 py-3 text-[11px] font-bold text-gray-500 uppercase tracking-wider">Category</th>
+                <th className="px-4 py-3 text-[11px] font-bold text-gray-500 uppercase tracking-wider">PAN</th>
+                <th className="px-4 py-3 text-[11px] font-bold text-gray-500 uppercase tracking-wider">GSTIN</th>
+                <th className="px-4 py-3 text-[11px] font-bold text-gray-500 uppercase tracking-wider">Services</th>
+                <th className="px-4 py-3 text-[11px] font-bold text-gray-500 uppercase tracking-wider">Manager</th>
+                <th className="px-4 py-3 text-[11px] font-bold text-gray-500 uppercase tracking-wider">Status</th>
+                <th className="px-4 py-3 text-[11px] font-bold text-gray-500 uppercase tracking-wider">Actions</th>
               </tr>
-            )}
-            {filtered.map(c => {
-              const mgr = users.find(u => u.id === c.manager);
-              return (
-                <tr key={c.id} className="border-b border-gray-100 hover:bg-gray-50 transition-colors">
-                  <td className="px-4 py-3">
-                    <div className="font-semibold text-[13px] text-blue-600 hover:underline cursor-pointer" onClick={() => { setSelected(c); setModal('view'); }}>{c.name}</div>
-                    <div className="text-[11px] text-gray-400 mt-0.5">{c.email}</div>
-                  </td>
-                  <td className="px-4 py-3 text-[12px]">{c.category}</td>
-                  <td className="px-4 py-3 text-[12px] font-mono">{c.pan}</td>
-                  <td className="px-4 py-3 text-[11.5px] font-mono">{c.gstin || '—'}</td>
-                  <td className="px-4 py-3">
-                    <div className="flex gap-1 flex-wrap">
-                      {c.services.slice(0, 3).map(s => <TypeChip key={s} type={s} />)}
-                      {c.services.length > 3 && <span className="text-[10px] text-gray-400 font-medium mt-0.5">+{c.services.length - 3}</span>}
-                    </div>
-                  </td>
-                  <td className="px-4 py-3">
-                    <div className="flex items-center gap-1.5">
-                      <Avatar user={mgr} size={20} />
-                      <span className="text-[12px]">{mgr?.name?.split(' ')[0] || '—'}</span>
-                    </div>
-                  </td>
-                  <td className="px-4 py-3">
-                    <span className={`inline-flex items-center px-2 py-0.5 rounded text-[11px] font-bold ${c.active ? 'bg-emerald-50 text-emerald-600' : 'bg-gray-100 text-gray-500'}`}>
-                      {c.active ? 'Active' : 'Inactive'}
-                    </span>
-                  </td>
-                  <td className="px-4 py-3">
-                    <div className="flex gap-1">
-                      <button className="w-7 h-7 rounded flex items-center justify-center text-gray-400 hover:bg-gray-200 hover:text-gray-900 transition-colors" onClick={() => openEdit(c)}><Edit2 size={13} /></button>
-                      <button className="w-7 h-7 rounded flex items-center justify-center text-gray-400 hover:bg-red-50 hover:text-red-600 transition-colors" onClick={() => del(c.id)}><Trash2 size={13} /></button>
+            </thead>
+            <tbody className="text-[13px] text-gray-700">
+              {filtered.length === 0 && (
+                <tr>
+                  <td colSpan={8}>
+                    <div className="flex flex-col items-center justify-center p-12 text-gray-500 gap-3">
+                      <Users size={32} className="opacity-30" />
+                      <h3 className="font-semibold text-gray-700 text-[15px]">No clients found</h3>
                     </div>
                   </td>
                 </tr>
-              );
-            })}
-          </tbody>
-        </table>
+              )}
+              {paginatedClients.map(c => {
+                const mgr = users.find(u => u.id === c.manager);
+                return (
+                  <tr key={c.id} className="border-b border-gray-100 hover:bg-gray-50 transition-colors">
+                    <td className="px-4 py-3">
+                      <div className="font-semibold text-[13px] text-blue-600 hover:underline cursor-pointer" onClick={() => { setSelected(c); setModal('view'); }}>{c.name}</div>
+                      <div className="text-[11px] text-gray-400 mt-0.5">{c.email}</div>
+                    </td>
+                    <td className="px-4 py-3 text-[12px]">{c.category}</td>
+                    <td className="px-4 py-3 text-[12px] font-mono">{c.pan}</td>
+                    <td className="px-4 py-3 text-[11.5px] font-mono">{c.gstin || '—'}</td>
+                    <td className="px-4 py-3">
+                      <div className="flex gap-1 flex-wrap">
+                        {c.services.slice(0, 3).map(s => <TypeChip key={s} type={s} />)}
+                        {c.services.length > 3 && <span className="text-[10px] text-gray-400 font-medium mt-0.5">+{c.services.length - 3}</span>}
+                      </div>
+                    </td>
+                    <td className="px-4 py-3">
+                      <div className="flex items-center gap-1.5">
+                        <Avatar user={mgr} size={20} />
+                        <span className="text-[12px]">{mgr?.name?.split(' ')[0] || '—'}</span>
+                      </div>
+                    </td>
+                    <td className="px-4 py-3">
+                      <span className={`inline-flex items-center px-2 py-0.5 rounded text-[11px] font-bold ${c.active ? 'bg-emerald-50 text-emerald-600' : 'bg-gray-100 text-gray-500'}`}>
+                        {c.active ? 'Active' : 'Inactive'}
+                      </span>
+                    </td>
+                    <td className="px-4 py-3">
+                      <div className="flex gap-1">
+                        <button className="w-7 h-7 rounded flex items-center justify-center text-gray-400 hover:bg-gray-200 hover:text-gray-900 transition-colors" onClick={() => openEdit(c)}><Edit2 size={13} /></button>
+                        <button className="w-7 h-7 rounded flex items-center justify-center text-gray-400 hover:bg-red-50 hover:text-red-600 transition-colors" onClick={() => del(c.id)}><Trash2 size={13} /></button>
+                      </div>
+                    </td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+
+        {/* Mobile Card View */}
+        <div className="md:hidden divide-y divide-gray-100">
+          {filtered.length === 0 && (
+            <div className="flex flex-col items-center justify-center p-12 text-gray-500 gap-3">
+              <Users size={32} className="opacity-30" />
+              <h3 className="font-semibold text-gray-700 text-[15px]">No clients found</h3>
+            </div>
+          )}
+          {paginatedClients.map(c => {
+            const mgr = users.find(u => u.id === c.manager);
+            return (
+              <div key={c.id} className="p-4 hover:bg-gray-50 transition-colors" onClick={() => { setSelected(c); setModal('view'); }}>
+                <div className="flex justify-between items-start mb-2">
+                  <div>
+                    <div className="font-bold text-[14px] text-blue-600">{c.name}</div>
+                    <div className="text-[11px] text-gray-400">{c.email}</div>
+                  </div>
+                  <span className={`inline-flex items-center px-2 py-0.5 rounded text-[10px] font-bold ${c.active ? 'bg-emerald-50 text-emerald-600' : 'bg-gray-100 text-gray-500'}`}>
+                    {c.active ? 'Active' : 'Inactive'}
+                  </span>
+                </div>
+                
+                <div className="grid grid-cols-2 gap-y-2 mb-3">
+                  <div>
+                    <div className="text-[10px] text-gray-400 uppercase font-bold tracking-wider">PAN</div>
+                    <div className="text-[12px] font-mono">{c.pan}</div>
+                  </div>
+                  <div>
+                    <div className="text-[10px] text-gray-400 uppercase font-bold tracking-wider">Category</div>
+                    <div className="text-[12px]">{c.category}</div>
+                  </div>
+                </div>
+
+                <div className="flex items-center justify-between">
+                  <div className="flex gap-1 flex-wrap">
+                    {c.services.slice(0, 2).map(s => <TypeChip key={s} type={s} />)}
+                    {c.services.length > 2 && <span className="text-[10px] text-gray-400 font-medium mt-0.5">+{c.services.length - 2}</span>}
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <Avatar user={mgr} size={18} />
+                    <span className="text-[11px] text-gray-600">{mgr?.name?.split(' ')[0] || '—'}</span>
+                  </div>
+                </div>
+
+                <div className="flex justify-end gap-2 mt-3 pt-3 border-t border-gray-50">
+                  <button 
+                    className="p-2 rounded-lg text-gray-400 hover:bg-gray-100 hover:text-gray-900 transition-colors"
+                    onClick={(e) => { e.stopPropagation(); openEdit(c); }}
+                  >
+                    <Edit2 size={14} />
+                  </button>
+                  <button 
+                    className="p-2 rounded-lg text-gray-400 hover:bg-red-50 hover:text-red-600 transition-colors"
+                    onClick={(e) => { e.stopPropagation(); del(c.id); }}
+                  >
+                    <Trash2 size={14} />
+                  </button>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+
+        <Pagination 
+          totalItems={filtered.length}
+          itemsPerPage={itemsPerPage}
+          currentPage={currentPage}
+          onPageChange={setCurrentPage}
+        />
+
+        <Coachmark 
+          id="clients-onboarding"
+          title="Build Your Client Base"
+          content="Add your clients and specify their services to enable automated compliance tracking and task generation."
+          targetId="add-client-btn"
+          position="bottom"
+        />
       </div>
 
       {modal === 'form' && form && (

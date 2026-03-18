@@ -1,53 +1,276 @@
 import React, { useState } from 'react';
 import { useApp } from '../context/AppContext';
 import { useToast } from '../context/ToastContext';
-import { Mail, Search, Inbox, Send, Archive, Star, Clock, Paperclip, CheckCircle2, MoreVertical, Sparkles, Plus } from 'lucide-react';
+import { Search, Filter, Plus, Calendar, Reply, Forward, Paperclip, Link as LinkIcon, Settings, Bot, CheckCircle2, Mail, X, Send, Inbox, Send as SendIcon, FileText, Trash2, AlertCircle, Sparkles } from 'lucide-react';
 import { Email } from '../types';
-import { Avatar } from '../components/ui/Avatar';
 import { TaskModal } from '../components/ui/TaskModal';
-import { genId, fmt, today } from '../utils';
+import { genUUID, fmt, today } from '../utils';
+import { RichTextEditor } from '../components/ui/RichTextEditor';
+import { summarizeEmail, improveDraft, EmailSummary } from '../services/geminiService';
+
+function EmailAutocompleteInput({ value = '', onChange, placeholder, users, clients }: any) {
+  const [showSuggestions, setShowSuggestions] = useState(false);
+  
+  const parts = value.split(',');
+  const currentPart = parts[parts.length - 1].trim();
+
+  const suggestions = [...users, ...clients].filter(p => 
+    currentPart.length > 1 &&
+    (p.name.toLowerCase().includes(currentPart.toLowerCase()) || 
+     p.email.toLowerCase().includes(currentPart.toLowerCase()))
+  ).slice(0, 5);
+
+  const handleSelect = (person: any) => {
+    const newParts = [...parts];
+    newParts[newParts.length - 1] = `${person.name} <${person.email}>`;
+    onChange(newParts.join(', ').trim() + ', ');
+    setShowSuggestions(false);
+  };
+
+  return (
+    <div className="relative flex-1">
+      <input 
+        type="text" 
+        value={value}
+        onChange={e => {
+          onChange(e.target.value);
+          setShowSuggestions(true);
+        }}
+        onFocus={() => setShowSuggestions(true)}
+        onBlur={() => setTimeout(() => setShowSuggestions(false), 200)}
+        className="w-full text-[14px] outline-none"
+        placeholder={placeholder}
+      />
+      {showSuggestions && suggestions.length > 0 && (
+        <div className="absolute top-full left-0 mt-1 w-full max-w-md bg-white border border-gray-200 rounded-lg shadow-lg z-50 overflow-hidden">
+          {suggestions.map((s: any) => (
+            <div 
+              key={s.id} 
+              className="px-3 py-2 hover:bg-gray-50 cursor-pointer flex flex-col"
+              onMouseDown={(e) => {
+                e.preventDefault();
+                handleSelect(s);
+              }}
+            >
+              <span className="text-[13px] font-medium text-gray-900">{s.name}</span>
+              <span className="text-[12px] text-gray-500">{s.email}</span>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
 
 export function InboxPage() {
-  const { emails, setEmails, tasks, setTasks, clients } = useApp();
+  const { emails, clients, users, currentUser, addEmail, updateEmail, deleteEmail, addTask } = useApp();
   const toast = useToast();
 
-  const [filter, setFilter] = useState<'inbox' | 'sent' | 'archive'>('inbox');
   const [search, setSearch] = useState('');
-  const [selectedEmail, setSelectedEmail] = useState<Email | null>(null);
+  const [clientFilter, setClientFilter] = useState('');
+  const [currentFolder, setCurrentFolder] = useState<'inbox' | 'sent' | 'drafts' | 'trash'>('inbox');
+  const [selectedEmail, setSelectedEmail] = useState<Email | null>(emails[0] || null);
   const [isTaskModalOpen, setIsTaskModalOpen] = useState(false);
-  const [draftReply, setDraftReply] = useState('');
+  const [composeModal, setComposeModal] = useState<{ isOpen: boolean, type: 'compose' | 'reply' | 'forward', email?: Email | null }>({ isOpen: false, type: 'compose' });
+  const [composeData, setComposeData] = useState({ to: '', cc: '', bcc: '', subject: '', body: '' });
+  const [showCcBcc, setShowCcBcc] = useState(false);
+  const [aiDraft, setAiDraft] = useState<{ subject: string, body: string } | null>(null);
   const [isDrafting, setIsDrafting] = useState(false);
+  const [mobileView, setMobileView] = useState<'list' | 'detail'>('list');
+  const [emailSummary, setEmailSummary] = useState<EmailSummary | null>(null);
+  const [isSummarizing, setIsSummarizing] = useState(false);
+  const [retryCount, setRetryCount] = useState(0);
+  const [aiError, setAiError] = useState<string | null>(null);
+
+  const fetchSummary = async () => {
+    if (!selectedEmail || currentFolder !== 'inbox') return;
+    setIsSummarizing(true);
+    setAiError(null);
+    try {
+      const summary = await summarizeEmail(
+        selectedEmail.subject,
+        selectedEmail.body,
+        selectedEmail.from,
+        currentUser?.name || 'User'
+      );
+      
+      // Check if the summary returned is actually an error fallback
+      if (summary.overview.includes('Quota Exceeded') || summary.overview.includes('limit has been reached')) {
+        setAiError(summary.overview);
+        setEmailSummary(null);
+      } else {
+        setEmailSummary(summary);
+      }
+    } catch (err: any) {
+      console.error(err);
+      setAiError(err.message || "Failed to generate AI insights.");
+    } finally {
+      setIsSummarizing(false);
+    }
+  };
+
+  React.useEffect(() => {
+    // Clear summary and error when email changes
+    setEmailSummary(null);
+    setAiError(null);
+  }, [selectedEmail, currentFolder]);
+
+  const openCompose = (type: 'compose' | 'reply' | 'forward', email?: Email | null, draftBody?: string) => {
+    setComposeModal({ isOpen: true, type, email });
+    setAiDraft(null);
+    setShowCcBcc(false);
+    
+    if (type === 'reply' && email) {
+      setComposeData({
+        to: email.fromEmail || email.from,
+        cc: '',
+        bcc: '',
+        subject: `Re: ${email.subject}`,
+        body: draftBody ? `${draftBody.replace(/\n/g, '<br>')}<br><br>On ${email.date} at ${email.time}, ${email.from} wrote:<br><blockquote>${email.body.replace(/\n/g, '<br>')}</blockquote>` : `<br><br>On ${email.date} at ${email.time}, ${email.from} wrote:<br><blockquote>${email.body.replace(/\n/g, '<br>')}</blockquote>`
+      });
+    } else if (type === 'forward' && email) {
+      setComposeData({
+        to: '',
+        cc: '',
+        bcc: '',
+        subject: `Fwd: ${email.subject}`,
+        body: `<br><br>---------- Forwarded message ---------<br>From: ${email.from} &lt;${email.fromEmail}&gt;<br>Date: ${email.date}, ${email.time}<br>Subject: ${email.subject}<br>To: ${email.to || 'rajesh@kdkfirm.in'}<br><br>${email.body.replace(/\n/g, '<br>')}`
+      });
+    } else {
+      setComposeData({ to: '', cc: '', bcc: '', subject: '', body: '' });
+    }
+  };
+
+  const handleAiDraft = async () => {
+    setIsDrafting(true);
+    try {
+      const result = await improveDraft(composeData.subject, composeData.body);
+      setAiDraft({ subject: result.subject || composeData.subject, body: result.body || 'Failed to generate draft.' });
+    } catch (error) {
+      console.error(error);
+      toast('Failed to generate AI draft', 'error');
+    } finally {
+      setIsDrafting(false);
+    }
+  };
+
+  const handleSend = async () => {
+    if (!composeData.to) {
+      toast('Please specify at least one recipient', 'error');
+      return;
+    }
+    
+    const newEmail: Email = {
+      id: genUUID(),
+      from: currentUser?.name || 'User',
+      fromEmail: currentUser?.email || 'user@example.com',
+      to: composeData.to,
+      cc: composeData.cc,
+      bcc: composeData.bcc,
+      clientId: composeModal.email?.clientId || clients[0]?.id || 'c1',
+      subject: composeData.subject || '(No Subject)',
+      preview: composeData.body.replace(/<[^>]*>?/gm, '').substring(0, 50) + '...',
+      body: composeData.body,
+      date: fmt(today),
+      time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+      read: true,
+      taskLinked: null,
+      attachments: [],
+      folder: 'sent'
+    };
+    
+    try {
+      if (composeModal.email?.folder === 'drafts') {
+        await deleteEmail(composeModal.email!.id);
+      }
+      await addEmail(newEmail);
+      toast('Message sent successfully', 'success');
+      setComposeModal({ isOpen: false, type: 'compose' });
+      if (currentFolder === 'sent') {
+        setSelectedEmail(newEmail);
+      }
+    } catch (error) {
+      console.error('Error sending email:', error);
+      toast('Failed to send message', 'error');
+    }
+  };
+
+  const handleClose = async () => {
+    if (composeData.body.trim() || composeData.subject.trim() || composeData.to.trim()) {
+      const draftEmail: Email = {
+        id: composeModal.email?.folder === 'drafts' ? composeModal.email.id : genUUID(),
+        from: currentUser?.name || 'User',
+        fromEmail: currentUser?.email || 'user@example.com',
+        to: composeData.to,
+        cc: composeData.cc,
+        bcc: composeData.bcc,
+        clientId: composeModal.email?.clientId || clients[0]?.id || 'c1',
+        subject: composeData.subject || '(No Subject)',
+        preview: composeData.body.replace(/<[^>]*>?/gm, '').substring(0, 50) + '...',
+        body: composeData.body,
+        date: fmt(today),
+        time: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
+        read: true,
+        taskLinked: null,
+        attachments: [],
+        folder: 'drafts'
+      };
+      
+      try {
+        if (composeModal.email?.folder === 'drafts') {
+          await updateEmail(draftEmail.id, draftEmail);
+        } else {
+          await addEmail(draftEmail);
+        }
+        toast('Draft saved', 'success');
+      } catch (error) {
+        console.error('Error saving draft:', error);
+      }
+    }
+    setComposeModal({ isOpen: false, type: 'compose' });
+  };
+
+  const handleDiscard = async () => {
+    if (composeModal.email?.folder === 'drafts') {
+      try {
+        await deleteEmail(composeModal.email!.id);
+        toast('Draft discarded', 'success');
+      } catch (error) {
+        console.error('Error discarding draft:', error);
+      }
+    }
+    setComposeModal({ isOpen: false, type: 'compose' });
+  };
 
   const filteredEmails = emails.filter(e => {
-    // Mocking folder logic since we don't have it in Email type yet, assuming all are inbox for now unless read=true and we want to archive
-    if (filter === 'archive' && !e.read) return false;
-    if (filter === 'inbox' && e.read && filter !== 'inbox') return false; // Just a simple mock filter
-    
+    const folder = e.folder || 'inbox';
+    if (folder !== currentFolder) return false;
     if (search && !e.subject.toLowerCase().includes(search.toLowerCase()) && !e.from.toLowerCase().includes(search.toLowerCase())) return false;
+    if (clientFilter && e.clientId !== clientFilter) return false;
     return true;
   });
 
-  const handleEmailClick = (email: Email) => {
-    setSelectedEmail(email);
-    if (!email.read) {
-      setEmails(emails.map(e => e.id === email.id ? { ...e, read: true } : e));
+  const handleEmailClick = async (email: Email) => {
+    if (email.folder === 'drafts') {
+      setComposeData({
+        to: email.to || '',
+        cc: email.cc || '',
+        bcc: email.bcc || '',
+        subject: email.subject === '(No Subject)' ? '' : email.subject,
+        body: email.body || ''
+      });
+      setComposeModal({ isOpen: true, type: 'compose', email });
+      return;
     }
-    setDraftReply('');
-  };
-
-  const generateAIDraft = () => {
-    setIsDrafting(true);
-    setTimeout(() => {
-      setDraftReply(`Dear ${selectedEmail?.from.split(' ')[0]},\n\nThank you for your email regarding "${selectedEmail?.subject}".\n\nI have received the documents and will process them shortly. I will let you know if anything else is required.\n\nBest regards,\nRajesh Sharma\nKDK Firm`);
-      setIsDrafting(false);
-      toast('AI Draft generated', 'success');
-    }, 1500);
-  };
-
-  const sendReply = () => {
-    if (!draftReply.trim()) return;
-    toast('Reply sent successfully', 'success');
-    setDraftReply('');
+    setSelectedEmail(email);
+    setMobileView('detail');
+    if (!email.read) {
+      try {
+        await updateEmail(email.id, { read: true });
+      } catch (error) {
+        console.error('Error marking email as read:', error);
+      }
+    }
   };
 
   const createTaskFromEmail = () => {
@@ -55,62 +278,95 @@ export function InboxPage() {
   };
 
   return (
-    <div className="h-full flex flex-col animate-slide-up">
-      <div className="flex items-start justify-between mb-5 shrink-0">
-        <div>
-          <h1 className="font-serif text-[22px] font-semibold text-gray-900">Inbox & Communications</h1>
-          <p className="text-[13px] text-gray-500 mt-0.5">Manage client emails and create tasks directly</p>
+    <div className="flex-1 flex flex-col animate-slide-up bg-[#f4f5f7] p-4 lg:p-8 overflow-y-auto">
+      {/* Top Header */}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 mb-6">
+        <div className="flex items-center gap-4">
+          <h1 className="text-[24px] font-serif font-bold text-gray-900">Email & Inbox</h1>
         </div>
-        <button className="bg-blue-600 hover:bg-blue-700 text-white px-3.5 py-2 rounded-lg text-[13px] font-medium flex items-center gap-1.5 transition-colors">
-          <Mail size={15} /> Compose
-        </button>
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="flex items-center gap-2 bg-white border border-gray-200 rounded-lg px-3 py-1.5 focus-within:border-blue-600 transition-colors w-full sm:w-[250px]">
+            <Search size={14} className="text-gray-400 shrink-0" />
+            <input 
+              placeholder="Search tasks, clients..." 
+              className="border-none bg-transparent outline-none text-[13px] w-full text-gray-900"
+            />
+          </div>
+          <button className="flex-1 sm:flex-none bg-white border border-gray-200 text-gray-700 px-3 py-1.5 rounded-lg text-[13px] font-medium flex items-center justify-center gap-2 hover:bg-gray-50 transition-colors">
+            <Filter size={14} /> Filter
+          </button>
+          <button onClick={() => openCompose('compose')} className="flex-1 sm:flex-none bg-[#d9534f] hover:bg-[#c9302c] text-white px-4 py-1.5 rounded-lg text-[13px] font-medium flex items-center justify-center gap-2 transition-colors">
+            <Plus size={14} /> Compose
+          </button>
+        </div>
       </div>
 
-      <div className="bg-white border border-gray-200 rounded-xl flex-1 flex overflow-hidden min-h-[500px]">
-        {/* Sidebar */}
-        <div className="w-[220px] shrink-0 border-r border-gray-200 flex flex-col bg-gray-50/50 p-3">
-          <div className="space-y-1">
+      {/* Email Integration Bar */}
+      <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-3 mb-4">
+        <div className="flex flex-col sm:flex-row sm:items-center gap-2 sm:gap-3">
+          <h2 className="text-[18px] font-serif font-bold text-gray-900">Email Integration</h2>
+          <span className="text-[13px] text-gray-500">Connected: {currentUser?.email || 'rajesh@kdkfirm.in'}</span>
+        </div>
+        <div className="flex items-center gap-2">
+          <select 
+            className="w-full sm:w-auto bg-white border border-gray-200 text-gray-700 px-3 py-1.5 rounded-lg text-[13px] font-medium outline-none focus:border-blue-500 hover:bg-gray-50 transition-colors cursor-pointer"
+            value={clientFilter}
+            onChange={e => setClientFilter(e.target.value)}
+          >
+            <option value="">All Clients</option>
+            {clients.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+          </select>
+        </div>
+      </div>
+
+      {/* Main Content Area */}
+      <div className="bg-white border border-gray-200 rounded-xl flex-1 flex flex-col lg:flex-row overflow-hidden min-h-[500px] shadow-sm">
+        
+        {/* Sidebar: Folders */}
+        <div className={`w-full lg:w-[200px] shrink-0 border-b lg:border-b-0 lg:border-r border-gray-200 flex flex-col bg-gray-50/50 p-3 max-h-[150px] lg:max-h-none overflow-y-auto ${mobileView === 'detail' ? 'hidden lg:flex' : 'flex'}`}>
+          <div className="flex lg:flex-col gap-1 overflow-x-auto lg:overflow-x-visible pb-2 lg:pb-0">
             <button 
-              className={`w-full flex items-center justify-between px-3 py-2 rounded-lg text-[13px] font-medium transition-colors ${filter === 'inbox' ? 'bg-blue-50 text-blue-700' : 'text-gray-600 hover:bg-gray-100'}`}
-              onClick={() => setFilter('inbox')}
+              onClick={() => { setCurrentFolder('inbox'); setSelectedEmail(null); }}
+              className={`flex-1 lg:w-full flex items-center justify-between px-3 py-2 rounded-lg text-[13px] font-medium transition-colors whitespace-nowrap ${currentFolder === 'inbox' ? 'bg-blue-50 text-blue-700' : 'text-gray-700 hover:bg-gray-100'}`}
             >
-              <div className="flex items-center gap-2"><Inbox size={16} /> Inbox</div>
-              <span className="bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded text-[10px] font-bold">{emails.filter(e => !e.read).length}</span>
-            </button>
-            <button 
-              className={`w-full flex items-center gap-2 px-3 py-2 rounded-lg text-[13px] font-medium transition-colors ${filter === 'sent' ? 'bg-blue-50 text-blue-700' : 'text-gray-600 hover:bg-gray-100'}`}
-              onClick={() => setFilter('sent')}
-            >
-              <Send size={16} /> Sent
-            </button>
-            <button 
-              className={`w-full flex items-center gap-2 px-3 py-2 rounded-lg text-[13px] font-medium transition-colors ${filter === 'archive' ? 'bg-blue-50 text-blue-700' : 'text-gray-600 hover:bg-gray-100'}`}
-              onClick={() => setFilter('archive')}
-            >
-              <Archive size={16} /> Archive
-            </button>
-          </div>
-          
-          <div className="mt-6">
-            <div className="text-[10px] font-bold text-gray-400 tracking-widest uppercase mb-2 px-3">Integrations</div>
-            <div className="px-3 space-y-2">
-              <div className="flex items-center gap-2 text-[12px] text-gray-600">
-                <div className="w-2 h-2 rounded-full bg-green-500"></div>
-                Gmail Connected
+              <div className="flex items-center gap-2">
+                <Inbox size={16} className={currentFolder === 'inbox' ? 'text-blue-600' : 'text-gray-400'} />
+                Inbox
               </div>
-              <div className="flex items-center gap-2 text-[12px] text-gray-600">
-                <div className="w-2 h-2 rounded-full bg-green-500"></div>
-                Outlook Connected
-              </div>
-            </div>
+              {emails.filter(e => (!e.folder || e.folder === 'inbox') && !e.read).length > 0 && (
+                <span className="bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded text-[11px] font-bold ml-2">
+                  {emails.filter(e => (!e.folder || e.folder === 'inbox') && !e.read).length}
+                </span>
+              )}
+            </button>
+            <button 
+              onClick={() => { setCurrentFolder('sent'); setSelectedEmail(null); }}
+              className={`flex-1 lg:w-full flex items-center gap-2 px-3 py-2 rounded-lg text-[13px] font-medium transition-colors whitespace-nowrap ${currentFolder === 'sent' ? 'bg-blue-50 text-blue-700' : 'text-gray-700 hover:bg-gray-100'}`}
+            >
+              <SendIcon size={16} className={currentFolder === 'sent' ? 'text-blue-600' : 'text-gray-400'} />
+              Sent
+            </button>
+            <button 
+              onClick={() => { setCurrentFolder('drafts'); setSelectedEmail(null); }}
+              className={`flex-1 lg:w-full flex items-center gap-2 px-3 py-2 rounded-lg text-[13px] font-medium transition-colors whitespace-nowrap ${currentFolder === 'drafts' ? 'bg-blue-50 text-blue-700' : 'text-gray-700 hover:bg-gray-100'}`}
+            >
+              <FileText size={16} className={currentFolder === 'drafts' ? 'text-blue-600' : 'text-gray-400'} />
+              Drafts
+            </button>
+            <button 
+              onClick={() => { setCurrentFolder('trash'); setSelectedEmail(null); }}
+              className={`flex-1 lg:w-full flex items-center gap-2 px-3 py-2 rounded-lg text-[13px] font-medium transition-colors whitespace-nowrap ${currentFolder === 'trash' ? 'bg-blue-50 text-blue-700' : 'text-gray-700 hover:bg-gray-100'}`}
+            >
+              <Trash2 size={16} className={currentFolder === 'trash' ? 'text-blue-600' : 'text-gray-400'} />
+              Trash
+            </button>
           </div>
         </div>
 
-        {/* Email List */}
-        <div className="w-[350px] shrink-0 border-r border-gray-200 flex flex-col bg-white">
+        {/* Middle Pane: Email List */}
+        <div className={`w-full lg:w-[320px] shrink-0 border-b lg:border-b-0 lg:border-r border-gray-200 flex flex-col bg-white ${mobileView === 'detail' ? 'hidden lg:flex' : 'flex-1 lg:flex-none'}`}>
           <div className="p-3 border-b border-gray-200 shrink-0">
-            <div className="flex items-center gap-2 bg-gray-50 border border-gray-200 rounded-lg px-3 py-1.5 focus-within:border-blue-600 focus-within:bg-white transition-colors">
-              <Search size={14} className="text-gray-400 shrink-0" />
+            <div className="flex items-center gap-2 bg-white border border-gray-200 rounded-lg px-3 py-2 focus-within:border-blue-600 transition-colors">
               <input 
                 placeholder="Search emails..." 
                 value={search} 
@@ -120,122 +376,186 @@ export function InboxPage() {
             </div>
           </div>
           <div className="flex-1 overflow-y-auto custom-scrollbar">
-            {filteredEmails.map(email => (
-              <div 
-                key={email.id} 
-                className={`p-3.5 border-b border-gray-100 cursor-pointer transition-colors hover:bg-gray-50 ${selectedEmail?.id === email.id ? 'bg-blue-50/50' : ''} ${!email.read ? 'bg-white' : 'bg-gray-50/30'}`}
-                onClick={() => handleEmailClick(email)}
-              >
-                <div className="flex justify-between items-start mb-1">
-                  <span className={`text-[13px] truncate pr-2 ${!email.read ? 'font-bold text-gray-900' : 'font-medium text-gray-700'}`}>{email.from}</span>
-                  <span className={`text-[11px] shrink-0 ${!email.read ? 'font-semibold text-blue-600' : 'text-gray-400'}`}>{email.time}</span>
-                </div>
-                <div className={`text-[12.5px] truncate mb-1 ${!email.read ? 'font-semibold text-gray-800' : 'text-gray-600'}`}>{email.subject}</div>
-                <div className="text-[12px] text-gray-500 truncate">{email.preview}</div>
-                
-                <div className="flex items-center gap-2 mt-2">
-                  {email.attachments.length > 0 && <Paperclip size={12} className="text-gray-400" />}
-                  {email.taskLinked && <span className="bg-blue-100 text-blue-700 px-1.5 py-0.5 rounded text-[9px] font-bold uppercase tracking-wider">Task Linked</span>}
-                </div>
+            {filteredEmails.length === 0 ? (
+              <div className="flex flex-col items-center justify-center h-full text-gray-400 p-6 text-center">
+                <Inbox size={48} className="mb-4 opacity-20" />
+                <p className="text-[14px] font-medium">No emails found</p>
+                <p className="text-[12px] mt-1">Try changing your filters or search query.</p>
               </div>
-            ))}
+            ) : (
+              filteredEmails.map(email => (
+                <div 
+                  key={email.id} 
+                  className={`p-4 border-b border-gray-100 cursor-pointer transition-all hover:bg-gray-50 ${selectedEmail?.id === email.id ? 'bg-orange-50/30' : ''}`}
+                  onClick={() => handleEmailClick(email)}
+                >
+                  <div className="flex justify-between items-start mb-1.5">
+                    <div className="flex items-center gap-2 truncate pr-2">
+                      {!email.read && <div className="w-2 h-2 rounded-full bg-[#d9534f] shrink-0" />}
+                      <span className={`text-[13.5px] truncate ${!email.read ? 'font-bold text-gray-900' : 'font-semibold text-gray-800'}`}>
+                        {currentFolder === 'sent' || currentFolder === 'drafts' ? `To: ${email.to || '(No Recipient)'}` : email.from}
+                      </span>
+                    </div>
+                    <span className={`text-[11px] shrink-0 ${!email.read ? 'font-semibold text-gray-600' : 'text-gray-400'}`}>{email.time}</span>
+                  </div>
+                  <div className={`text-[13px] truncate mb-1 ${!email.read ? 'font-semibold text-gray-800' : 'text-gray-700'}`}>{email.subject}</div>
+                  <div className="text-[12px] text-gray-500 truncate">{email.preview}</div>
+                </div>
+              ))
+            )}
           </div>
         </div>
 
-        {/* Email Detail */}
-        <div className="flex-1 flex flex-col bg-white min-w-0">
+        {/* Right Pane: Email Detail */}
+        <div className={`flex-1 flex flex-col bg-white min-w-0 ${mobileView === 'list' ? 'hidden lg:flex' : 'flex'}`}>
           {selectedEmail ? (
             <>
-              <div className="p-5 border-b border-gray-200 shrink-0">
-                <div className="flex justify-between items-start mb-4">
-                  <h2 className="text-[18px] font-semibold text-gray-900 leading-tight">{selectedEmail.subject}</h2>
-                  <div className="flex gap-2 shrink-0">
-                    <button className="w-8 h-8 rounded-lg border border-gray-200 flex items-center justify-center text-gray-500 hover:bg-gray-50 transition-colors" title="Archive">
-                      <Archive size={14} />
-                    </button>
-                    <button className="w-8 h-8 rounded-lg border border-gray-200 flex items-center justify-center text-gray-500 hover:bg-gray-50 transition-colors" title="More">
-                      <MoreVertical size={14} />
-                    </button>
-                  </div>
+              <div className="p-4 lg:p-6 border-b border-gray-100 shrink-0">
+                <div className="flex items-center gap-2 mb-4 lg:hidden">
+                  <button 
+                    onClick={() => setMobileView('list')}
+                    className="p-2 -ml-2 text-gray-500 hover:text-gray-900"
+                  >
+                    <X size={20} />
+                  </button>
+                  <span className="text-[14px] font-bold text-gray-700">Back to List</span>
                 </div>
+                <h2 className="text-[18px] lg:text-[22px] font-serif font-bold text-gray-900 mb-4">{selectedEmail.subject}</h2>
                 
-                <div className="flex items-center justify-between">
-                  <div className="flex items-center gap-3">
-                    <Avatar user={{ name: selectedEmail.from, color: '#2563eb' } as any} size={36} />
-                    <div>
-                      <div className="text-[13.5px] font-semibold text-gray-900">{selectedEmail.from}</div>
-                      <div className="text-[12px] text-gray-500">to me • {selectedEmail.date} at {selectedEmail.time}</div>
-                    </div>
-                  </div>
-                  
-                  {!selectedEmail.taskLinked ? (
-                    <button 
-                      className="bg-white border border-gray-200 hover:bg-gray-50 text-gray-700 px-3 py-1.5 rounded-lg text-[12px] font-medium flex items-center gap-1.5 transition-colors shadow-sm"
-                      onClick={createTaskFromEmail}
-                    >
-                      <Plus size={14} /> Create Task
-                    </button>
-                  ) : (
-                    <button className="bg-green-50 border border-green-200 text-green-700 px-3 py-1.5 rounded-lg text-[12px] font-medium flex items-center gap-1.5 cursor-default">
-                      <CheckCircle2 size={14} /> Task Created
-                    </button>
-                  )}
+                <div className="text-[12px] lg:text-[13px] text-gray-600 mb-4">
+                  From: <span className="font-semibold text-gray-900">{selectedEmail.from}</span> &lt;{selectedEmail.fromEmail}&gt; · To: {selectedEmail.to || 'rajesh@kdkfirm.in'}
+                  {selectedEmail.cc && ` · CC: ${selectedEmail.cc}`}
+                  {selectedEmail.bcc && ` · BCC: ${selectedEmail.bcc}`}
+                  {' '}· {selectedEmail.date} · {selectedEmail.time}
                 </div>
-              </div>
-              
-              <div className="flex-1 overflow-y-auto p-5 custom-scrollbar">
-                <div className="text-[13.5px] text-gray-800 whitespace-pre-wrap leading-relaxed">
-                  {selectedEmail.body}
-                </div>
-                
-                {selectedEmail.attachments.length > 0 && (
-                  <div className="mt-8 pt-4 border-t border-gray-100">
-                    <div className="text-[12px] font-semibold text-gray-500 mb-3">{selectedEmail.attachments.length} Attachments</div>
-                    <div className="flex gap-3 flex-wrap">
-                      {selectedEmail.attachments.map((att, i) => (
-                        <div key={i} className="flex items-center gap-2 border border-gray-200 rounded-lg p-2.5 hover:bg-gray-50 cursor-pointer transition-colors">
-                          <div className="w-8 h-8 rounded bg-blue-50 flex items-center justify-center text-blue-600">
-                            <Paperclip size={14} />
-                          </div>
-                          <div className="text-[12.5px] font-medium text-gray-700">{att}</div>
+
+                <div className="flex items-center gap-2 flex-wrap">
+                  {currentFolder === 'inbox' && (
+                    <>
+                      {!selectedEmail.taskLinked ? (
+                        <div className="flex items-center gap-2">
+                          <button 
+                            className="bg-[#d9534f] hover:bg-[#c9302c] text-white px-3 py-1.5 rounded-md text-[13px] font-medium flex items-center gap-1.5 transition-colors shadow-sm"
+                            onClick={createTaskFromEmail}
+                          >
+                            <Plus size={14} /> <span className="hidden sm:inline">Convert to Task</span><span className="sm:hidden">Task</span>
+                          </button>
                         </div>
-                      ))}
-                    </div>
-                  </div>
-                )}
+                      ) : (
+                        <button className="bg-green-50 border border-green-200 text-green-700 px-3 py-1.5 rounded-md text-[13px] font-medium flex items-center gap-1.5 cursor-default">
+                          <CheckCircle2 size={14} /> <span className="hidden sm:inline">Task Linked</span>
+                        </button>
+                      )}
+                    </>
+                  )}
+                  <button onClick={() => toast('Meeting scheduled successfully', 'success')} className="bg-white border border-gray-200 text-gray-700 px-3 py-1.5 rounded-md text-[13px] font-medium flex items-center gap-1.5 hover:bg-gray-50 transition-colors">
+                    <Calendar size={14} /> <span className="hidden sm:inline">Schedule Meeting</span><span className="sm:hidden">Meet</span>
+                  </button>
+                  <button onClick={() => openCompose('reply', selectedEmail)} className="bg-white border border-gray-200 text-gray-700 px-3 py-1.5 rounded-md text-[13px] font-medium flex items-center gap-1.5 hover:bg-gray-50 transition-colors">
+                    <Reply size={14} /> <span className="hidden sm:inline">Reply</span>
+                  </button>
+                  <button onClick={() => openCompose('forward', selectedEmail)} className="bg-white border border-gray-200 text-gray-700 px-3 py-1.5 rounded-md text-[13px] font-medium flex items-center gap-1.5 hover:bg-gray-50 transition-colors">
+                    <Forward size={14} /> <span className="hidden sm:inline">Forward</span>
+                  </button>
+                  <button onClick={() => document.getElementById('email-attachment-upload')?.click()} className="bg-white border border-gray-200 text-gray-700 px-3 py-1.5 rounded-md text-[13px] font-medium flex items-center gap-1.5 hover:bg-gray-50 transition-colors">
+                    <Paperclip size={14} /> <span className="hidden sm:inline">Attachments</span> {selectedEmail.attachments.length > 0 && `(${selectedEmail.attachments.length})`}
+                  </button>
+                  <button onClick={() => toast('Email linked to client', 'success')} className="bg-white border border-gray-200 text-gray-700 px-3 py-1.5 rounded-md text-[13px] font-medium flex items-center gap-1.5 hover:bg-gray-50 transition-colors">
+                    <LinkIcon size={14} /> <span className="hidden sm:inline">Link to Client</span><span className="sm:hidden">Link</span>
+                  </button>
+                </div>
               </div>
               
-              <div className="p-4 border-t border-gray-200 bg-gray-50/50 shrink-0">
-                <div className="bg-white border border-gray-200 rounded-xl overflow-hidden focus-within:border-blue-500 focus-within:ring-1 focus-within:ring-blue-500 transition-all">
-                  <textarea 
-                    className="w-full p-3 text-[13.5px] outline-none resize-none min-h-[100px]"
-                    placeholder="Reply to this email..."
-                    value={draftReply}
-                    onChange={e => setDraftReply(e.target.value)}
+              <div className="flex-1 overflow-y-auto p-4 lg:p-8 bg-gray-50/30 custom-scrollbar flex flex-col items-center">
+                <div className="w-full max-w-4xl bg-white p-6 lg:p-10 rounded-xl shadow-sm border border-gray-100 min-h-full flex flex-col">
+                  <div 
+                    className="text-[14px] lg:text-[15px] text-gray-800 leading-relaxed flex-1 prose prose-sm lg:prose-base max-w-none"
+                    dangerouslySetInnerHTML={{ __html: selectedEmail.body.includes('<') ? selectedEmail.body : selectedEmail.body.replace(/\n/g, '<br>') }}
                   />
-                  <div className="flex items-center justify-between p-2 bg-gray-50 border-t border-gray-100">
-                    <button 
-                      className="text-purple-600 hover:bg-purple-50 px-3 py-1.5 rounded-lg text-[12px] font-medium flex items-center gap-1.5 transition-colors"
-                      onClick={generateAIDraft}
-                      disabled={isDrafting}
-                    >
-                      <Sparkles size={14} className={isDrafting ? 'animate-pulse' : ''} /> 
-                      {isDrafting ? 'Drafting...' : 'Draft with AI'}
-                    </button>
-                    <button 
-                      className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-1.5 rounded-lg text-[13px] font-medium flex items-center gap-1.5 transition-colors"
-                      onClick={sendReply}
-                    >
-                      <Send size={14} /> Send
-                    </button>
-                  </div>
+                  
+                  {/* AI Suggestion Box at the bottom of the email body */}
+                  {currentFolder === 'inbox' && (
+                    <div className="mt-12 bg-orange-50/50 border border-orange-100 rounded-xl p-5 lg:p-6">
+                      <div className="flex items-center justify-between mb-3">
+                        <div className="flex items-center gap-2 text-[14px] font-bold text-[#d9534f]">
+                          <Bot size={18} /> AI Summary & Suggested Reply
+                        </div>
+                      </div>
+                      {isSummarizing ? (
+                        <div className="flex items-center gap-2 text-[14px] text-gray-500 animate-pulse">
+                          <div className="w-4 h-4 rounded-full border-2 border-orange-400 border-t-transparent animate-spin" />
+                          Analyzing email content...
+                        </div>
+                      ) : emailSummary ? (
+                        <>
+                          <div className="text-[14px] text-gray-700 leading-relaxed mb-4">
+                            <div className="bg-white/50 p-3 rounded-lg border border-orange-100/50">
+                              <strong className="text-[#d9534f] text-[12px] uppercase tracking-wider block mb-1">Executive Summary</strong>
+                              {emailSummary.overview}
+                            </div>
+                          </div>
+                          
+                          <div className="space-y-3">
+                            <strong className="text-[#d9534f] text-[12px] uppercase tracking-wider block">Suggested Response</strong>
+                            <div 
+                              className="bg-white border border-orange-100 rounded-lg p-4 text-[14px] text-gray-700 italic prose prose-sm max-w-none shadow-sm"
+                              dangerouslySetInnerHTML={{ __html: emailSummary.suggestedReply.includes('<') ? emailSummary.suggestedReply : emailSummary.suggestedReply.replace(/\n/g, '<br>') }}
+                            />
+                          </div>
+
+                          <div className="mt-4 flex items-center gap-4 border-t border-orange-100 pt-4">
+                            <button 
+                              onClick={() => openCompose('reply', selectedEmail, emailSummary.suggestedReply)}
+                              className="bg-[#d9534f] text-white px-4 py-2 rounded-lg text-[13px] font-bold hover:bg-[#c9302c] flex items-center gap-2 transition-all shadow-sm"
+                            >
+                              <Reply size={16} /> Use this draft
+                            </button>
+                            <button 
+                              onClick={() => setRetryCount(prev => prev + 1)}
+                              className="text-gray-500 text-[13px] font-medium hover:text-gray-700 flex items-center gap-1.5 transition-colors"
+                            >
+                              <Settings size={14} /> Regenerate
+                            </button>
+                          </div>
+                        </>
+                      ) : aiError ? (
+                        <div className="flex flex-col gap-3 p-4 bg-red-50 border border-red-100 rounded-xl">
+                          <div className="flex items-center gap-2 text-red-600 font-bold text-[14px]">
+                            <AlertCircle size={18} />
+                            AI Quota Exceeded
+                          </div>
+                          <div className="text-[13px] text-red-700 leading-relaxed">
+                            {aiError}
+                          </div>
+                          <button 
+                            onClick={() => setRetryCount(prev => prev + 1)}
+                            className="bg-white border border-red-200 text-red-600 px-4 py-2 rounded-lg text-[13px] font-bold hover:bg-red-50 w-fit shadow-sm transition-all mt-2"
+                          >
+                            Try again
+                          </button>
+                        </div>
+                      ) : (
+                        <div className="flex flex-col gap-3">
+                          <div className="text-[14px] text-gray-500">Generate an AI summary and suggested reply for this email.</div>
+                          <button 
+                            onClick={fetchSummary}
+                            className="bg-[#d9534f] text-white px-4 py-2 rounded-lg text-[13px] font-bold hover:bg-[#c9302c] w-fit shadow-sm transition-all flex items-center gap-2"
+                          >
+                            <Sparkles size={16} /> Generate AI Summary
+                          </button>
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
               </div>
             </>
           ) : (
-            <div className="flex-1 flex flex-col items-center justify-center text-gray-400">
-              <Mail size={48} className="mb-4 opacity-20" />
-              <p className="text-[14px] font-medium text-gray-500">Select an email to read</p>
+            <div className="flex-1 flex flex-col items-center justify-center text-gray-400 bg-gray-50/30">
+              <div className="w-20 h-20 bg-gray-100 rounded-full flex items-center justify-center mb-4">
+                <Mail size={32} className="text-gray-300" />
+              </div>
+              <p className="text-[15px] font-medium text-gray-600 mb-1">Select an email to read</p>
             </div>
           )}
         </div>
@@ -245,25 +565,162 @@ export function InboxPage() {
         <TaskModal
           task={{
             id: '',
-            title: `Follow up: ${selectedEmail.subject}`,
+            title: emailSummary?.title || `Follow up: ${selectedEmail.subject}`,
             clientId: selectedEmail.clientId || '',
             type: 'Other',
             status: 'To Do',
-            priority: 'Medium',
-            assigneeId: 'u1',
+            priority: (selectedEmail.subject + " " + selectedEmail.body).toLowerCase().includes('urgent') ? 'High' : 'Medium',
+            assigneeId: currentUser?.id || 'u1',
             reviewerId: '',
             dueDate: fmt(today),
             createdAt: fmt(today),
             recurring: 'One-time',
-            description: `From Email:\n\n${selectedEmail.body}`,
-            tags: ['email'],
+            description: emailSummary ? `<p><strong>Task Overview:</strong> ${emailSummary.overview}</p><p><strong>Action Items:</strong></p><ul>${emailSummary.steps.map(s => `<li>${s}</li>`).join('')}</ul>` : selectedEmail.body,
+            tags: ['email', 'ai-suggested'],
             subtasks: [],
             comments: [],
-            attachments: [],
-            activity: []
+            attachments: selectedEmail.attachments.map((a, i) => ({ id: `att-${i}`, name: a, url: '#', type: a.endsWith('.pdf') ? 'pdf' : 'other', size: '1 MB' })),
+            activity: [{ text: 'Task created from email', at: fmt(today) }]
           }}
           onClose={() => setIsTaskModalOpen(false)}
         />
+      )}
+
+      {composeModal.isOpen && (
+        <div className="fixed inset-0 bg-black/50 z-50 flex items-center justify-center p-4">
+          <div className="bg-white rounded-xl shadow-2xl w-full max-w-3xl flex flex-col overflow-hidden animate-slide-up h-[80vh]">
+            <div className="flex items-center justify-between p-3 border-b border-gray-200 bg-gray-50">
+              <h3 className="text-[14px] font-bold text-gray-700">
+                {composeModal.type === 'compose' ? 'New Message' : composeModal.type === 'reply' ? 'Reply' : 'Forward'}
+              </h3>
+              <div className="flex items-center gap-2">
+                <button onClick={handleClose} className="w-8 h-8 flex items-center justify-center rounded-lg text-gray-400 hover:bg-gray-200 hover:text-gray-700 transition-colors">
+                  <X size={18} />
+                </button>
+              </div>
+            </div>
+            
+            <div className="flex flex-col flex-1 overflow-hidden">
+              <div className="px-4 py-2 border-b border-gray-100 flex items-center">
+                <span className="text-[13px] text-gray-500 w-12">To</span>
+                <EmailAutocompleteInput 
+                  value={composeData.to}
+                  onChange={(val: string) => setComposeData({ ...composeData, to: val })}
+                  users={users}
+                  clients={clients}
+                />
+                <button 
+                  onClick={() => setShowCcBcc(!showCcBcc)}
+                  className="text-[12px] text-gray-500 hover:text-gray-700 font-medium px-2 py-1 rounded hover:bg-gray-100"
+                >
+                  Cc/Bcc
+                </button>
+              </div>
+              
+              {showCcBcc && (
+                <>
+                  <div className="px-4 py-2 border-b border-gray-100 flex items-center">
+                    <span className="text-[13px] text-gray-500 w-12">Cc</span>
+                    <EmailAutocompleteInput 
+                      value={composeData.cc}
+                      onChange={(val: string) => setComposeData({ ...composeData, cc: val })}
+                      users={users}
+                      clients={clients}
+                    />
+                  </div>
+                  <div className="px-4 py-2 border-b border-gray-100 flex items-center">
+                    <span className="text-[13px] text-gray-500 w-12">Bcc</span>
+                    <EmailAutocompleteInput 
+                      value={composeData.bcc}
+                      onChange={(val: string) => setComposeData({ ...composeData, bcc: val })}
+                      users={users}
+                      clients={clients}
+                    />
+                  </div>
+                </>
+              )}
+              
+              <div className="px-4 py-2 border-b border-gray-100 flex items-center">
+                <span className="text-[13px] text-gray-500 w-12">Subject</span>
+                <input 
+                  type="text" 
+                  value={composeData.subject}
+                  onChange={e => setComposeData({ ...composeData, subject: e.target.value })}
+                  className="flex-1 text-[14px] outline-none font-medium"
+                />
+              </div>
+
+              <div className="flex-1 flex relative flex-col">
+                <div className="flex-1 overflow-y-auto">
+                  <RichTextEditor 
+                    content={composeData.body}
+                    onChange={(content) => setComposeData({ ...composeData, body: content })}
+                    placeholder="Write your email here..."
+                  />
+                </div>
+                
+                {aiDraft && (
+                  <div className="absolute right-4 top-4 bottom-4 w-[400px] bg-orange-50 border border-orange-200 rounded-xl shadow-lg flex flex-col overflow-hidden animate-fade-in z-10">
+                    <div className="p-3 border-b border-orange-100 bg-orange-100/50 flex items-center justify-between">
+                      <div className="flex items-center gap-2 text-[13px] font-bold text-orange-800">
+                        <Bot size={16} /> AI Suggestion
+                      </div>
+                      <button onClick={() => setAiDraft(null)} className="text-orange-600 hover:bg-orange-200 p-1 rounded">
+                        <X size={14} />
+                      </button>
+                    </div>
+                    <div className="p-4 flex-1 overflow-y-auto text-[13px] text-gray-700">
+                      <div className="mb-3">
+                        <span className="font-bold text-gray-900">Subject:</span> {aiDraft.subject}
+                      </div>
+                      <div className="prose prose-sm max-w-none" dangerouslySetInnerHTML={{ __html: aiDraft.body }} />
+                    </div>
+                    <div className="p-3 border-t border-orange-100 bg-white flex gap-2">
+                      <button 
+                        onClick={() => {
+                          setComposeData({ ...composeData, subject: aiDraft.subject, body: aiDraft.body });
+                          setAiDraft(null);
+                        }}
+                        className="flex-1 bg-orange-600 hover:bg-orange-700 text-white py-1.5 rounded-lg text-[12px] font-bold transition-colors"
+                      >
+                        Use Draft
+                      </button>
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+
+            <div className="p-3 border-t border-gray-200 bg-gray-50 flex items-center justify-between">
+              <div className="flex items-center gap-1">
+                <input type="file" id="email-attachment-upload" className="hidden" multiple onChange={(e) => {
+                  if (e.target.files && e.target.files.length > 0) {
+                    toast(`${e.target.files.length} file(s) attached`, 'success');
+                  }
+                }} />
+                <button onClick={() => document.getElementById('email-attachment-upload')?.click()} className="p-2 text-gray-500 hover:text-gray-800 hover:bg-gray-200 rounded-lg transition-colors" title="Attach files">
+                  <Paperclip size={18} />
+                </button>
+                <div className="w-px h-6 bg-gray-300 mx-1"></div>
+                <button 
+                  onClick={handleAiDraft}
+                  disabled={isDrafting}
+                  className="flex items-center gap-1.5 px-3 py-1.5 text-[13px] font-bold text-orange-600 hover:bg-orange-100 rounded-lg transition-colors disabled:opacity-50"
+                >
+                  <Bot size={16} /> {isDrafting ? 'Drafting...' : composeData.body.trim() ? 'AI Rephrase' : 'AI Draft'}
+                </button>
+              </div>
+              <div className="flex items-center gap-3">
+                <button onClick={handleDiscard} className="text-[13px] font-medium text-gray-600 hover:text-gray-900">
+                  Discard
+                </button>
+                <button onClick={handleSend} className="bg-blue-600 hover:bg-blue-700 text-white px-6 py-2 rounded-lg text-[13px] font-bold flex items-center gap-2 transition-colors shadow-sm">
+                  <Send size={16} /> Send
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

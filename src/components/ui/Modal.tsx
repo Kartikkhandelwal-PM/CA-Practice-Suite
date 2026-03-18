@@ -6,7 +6,7 @@ interface ModalProps {
   children: ReactNode;
   onClose: () => void;
   footer?: ReactNode;
-  size?: 'sm' | 'md' | 'lg' | 'xl';
+  size?: 'sm' | 'md' | 'lg' | 'xl' | '2xl' | '3xl' | '4xl';
   headerBg?: string;
   headerColor?: string;
 }
@@ -17,6 +17,9 @@ export function Modal({ title, children, onClose, footer, size = 'md', headerBg,
     md: 'max-w-[640px]',
     lg: 'max-w-[820px]',
     xl: 'max-w-[1000px]',
+    '2xl': 'max-w-[1200px]',
+    '3xl': 'max-w-[1400px]',
+    '4xl': 'max-w-[1600px]',
   };
 
   return (

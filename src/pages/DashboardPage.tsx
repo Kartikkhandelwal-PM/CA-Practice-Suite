@@ -1,17 +1,23 @@
 import React, { useState } from 'react';
 import { useApp } from '../context/AppContext';
-import { daysLeft, pct } from '../utils';
-import { AlertCircle, Zap, Clock, CheckCircle, Calendar as CalendarIcon, Users, ShieldAlert, GitMerge, Plus, ExternalLink } from 'lucide-react';
-import { motion } from 'motion/react';
+import { useToast } from '../context/ToastContext';
+import { daysLeft, pct, canTransition } from '../utils';
+import { AlertCircle, Zap, Clock, CheckCircle, Calendar as CalendarIcon, Users, ShieldAlert, GitMerge, Plus, ExternalLink, ArrowRight, FileText, UserPlus, Video, LayoutDashboard, CheckCircle2, Sparkles } from 'lucide-react';
+import { motion, AnimatePresence } from 'motion/react';
 import { TypeChip, StatusBadge } from '../components/ui/Badges';
 import { Avatar } from '../components/ui/Avatar';
 import { TaskModal } from '../components/ui/TaskModal';
 import { Task } from '../types';
+import { useNavigate } from 'react-router-dom';
+import { PageHeader } from '../components/ui/PageHeader';
 
 export function DashboardPage() {
-  const { tasks, setTasks, clients, users, deadlines, meetings } = useApp();
+  const { tasks, clients, users, deadlines, meetings, taskTypes, workflows, currentUser, updateTask } = useApp();
+  const toast = useToast();
   const [isModalOpen, setIsModalOpen] = useState(false);
   const [editingTask, setEditingTask] = useState<Task | null>(null);
+  const [activeView, setActiveView] = useState<string | null>(null);
+  const navigate = useNavigate();
 
   const openNewTask = () => {
     setEditingTask(null);
@@ -23,64 +29,154 @@ export function DashboardPage() {
     setIsModalOpen(true);
   };
   
-  const markComplete = (id: string, e: React.MouseEvent) => {
+  const markComplete = async (id: string, e: React.MouseEvent) => {
     e.stopPropagation();
-    setTasks(tasks.map(t => t.id === id ? { ...t, status: 'Completed' } : t));
+    const task = tasks.find(t => t.id === id);
+    if (task) {
+      const check = canTransition(task, 'Completed', taskTypes, workflows);
+      if (!check.allowed) {
+        toast(check.reason || 'Invalid transition to Completed', 'error');
+        return;
+      }
+    }
+    try {
+      await updateTask(id, { status: 'Completed' });
+      toast('Task marked as completed', 'success');
+    } catch (error) {
+      console.error('Error marking task complete:', error);
+      toast('Failed to update task', 'error');
+    }
   };
-  const overdue = tasks.filter(t => t.status !== 'Completed' && (daysLeft(t.dueDate) ?? 0) < 0);
-  const inProgress = tasks.filter(t => t.status === 'In Progress').length;
-  const completed = tasks.filter(t => t.status === 'Completed').length;
-  const dueSoon = tasks.filter(t => t.status !== 'Completed' && (daysLeft(t.dueDate) ?? -1) >= 0 && (daysLeft(t.dueDate) ?? 8) <= 7).length;
+
+  const filteredTasks = tasks.filter(t => {
+    if (currentUser?.role?.toLowerCase() === 'admin') return true;
+    return t.assigneeId === currentUser?.id || t.reviewerId === currentUser?.id;
+  });
+
+  const overdue = filteredTasks.filter(t => t.status !== 'Completed' && (daysLeft(t.dueDate) ?? 0) < 0);
+  const awaitingInfo = filteredTasks.filter(t => t.status === 'Awaiting Info');
+  const dueSoon = filteredTasks.filter(t => t.status !== 'Completed' && (daysLeft(t.dueDate) ?? -1) >= 0 && (daysLeft(t.dueDate) ?? 8) <= 7);
+  const underReview = filteredTasks.filter(t => t.status === 'Under Review');
   const urgent = deadlines.filter(d => (daysLeft(d.dueDate) ?? 8) <= 7 && (daysLeft(d.dueDate) ?? -1) >= 0);
-  const upcomingMeetings = meetings.filter(m => (daysLeft(m.date) ?? -1) >= 0 && m.status !== 'completed').slice(0, 3);
+  const upcomingMeetings = meetings.filter(m => m.attendees.includes(currentUser?.id || '') && (daysLeft(m.date) ?? -1) >= 0 && m.status !== 'completed').slice(0, 3);
 
   const stats = [
-    { label: 'Overdue Tasks', num: overdue.length, sub: `${Math.abs(Math.min(...overdue.map(t => daysLeft(t.dueDate) || 0)) || 0)} days max`, color: '#dc2626', icon: AlertCircle },
-    { label: 'In Progress', num: inProgress, sub: 'Active tasks', color: '#2563eb', icon: Zap },
-    { label: 'Due This Week', num: dueSoon, sub: 'In the next 7 days', color: '#d97706', icon: Clock },
-    { label: 'Completed', num: completed, sub: `of ${tasks.length} total tasks`, color: '#059669', icon: CheckCircle },
+    { id: 'overdue', label: 'Overdue Tasks', num: overdue.length, sub: overdue.length > 0 ? `${Math.abs(Math.min(...overdue.map(t => daysLeft(t.dueDate) || 0)))} days max` : 'No overdue tasks', color: '#dc2626', icon: AlertCircle, filter: 'overdue' },
+    { id: 'due-soon', label: 'Due This Week', num: dueSoon.length, sub: 'In the next 7 days', color: '#2563eb', icon: Clock, filter: 'due-soon' },
+    { id: 'awaiting-info', label: 'Awaiting Info', num: awaitingInfo.length, sub: 'Blocked by client', color: '#d97706', icon: ShieldAlert, filter: 'Awaiting Info' },
+    { id: 'under-review', label: 'Under Review', num: underReview.length, sub: 'Needs partner approval', color: '#8b5cf6', icon: CheckCircle2, filter: 'Under Review' },
   ];
 
-  return (
-    <div className="h-full">
-      <div className="flex items-start gap-3 mb-6">
-        <div className="flex-1">
-          <h1 className="font-serif text-[22px] font-semibold text-gray-900">Good morning, Rajesh</h1>
-          <p className="text-[13px] text-gray-500 mt-0.5">Here's what needs your attention today — {new Date().toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'long' })}</p>
-        </div>
-        <button className="bg-blue-600 hover:bg-blue-700 text-white px-3.5 py-2 rounded-lg text-[13px] font-medium flex items-center gap-1.5 transition-colors shadow-sm" onClick={openNewTask}>
-          <Plus size={15} /> New Task
-        </button>
-      </div>
+  const handleStatClick = (s: typeof stats[0]) => {
+    if (s.id === 'overdue') {
+      navigate(`/tasks?tab=overdue`);
+    } else if (s.id === 'due-soon') {
+      navigate(`/tasks?tab=due-soon`);
+    } else if (s.id === 'awaiting-info') {
+      navigate(`/tasks?status=Awaiting Info`);
+    } else if (s.id === 'under-review') {
+      navigate(`/tasks?status=Under Review`);
+    }
+  };
 
-      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4 mb-5">
+  const quickActions = [
+    { label: 'New Task', icon: Plus, onClick: openNewTask, color: 'bg-blue-600' },
+    { label: 'Add Client', icon: UserPlus, onClick: () => navigate('/clients'), color: 'bg-emerald-600' },
+    { label: 'Schedule Meeting', icon: Video, onClick: () => navigate('/meetings'), color: 'bg-purple-600' },
+    { label: 'Upload Document', icon: FileText, onClick: () => navigate('/documents'), color: 'bg-amber-600' },
+  ];
+
+  const getFilteredTasks = () => {
+    if (activeView === 'overdue') return overdue;
+    if (activeView === 'in-progress') return filteredTasks.filter(t => t.status === 'In Progress');
+    if (activeView === 'due-soon') return filteredTasks.filter(t => t.status !== 'Completed' && (daysLeft(t.dueDate) ?? -1) >= 0 && (daysLeft(t.dueDate) ?? 8) <= 7);
+    if (activeView === 'completed') return filteredTasks.filter(t => t.status === 'Completed');
+    return [];
+  };
+
+  return (
+    <div className="flex-1 pb-10">
+      <PageHeader 
+        title={`Welcome back, ${currentUser?.name.split(' ')[0] || 'User'}`}
+        description={`Here's what's happening with your practice today, ${new Date().toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'long' })}.`}
+        action={
+          <div className="flex items-center gap-2 flex-wrap sm:flex-nowrap">
+            {quickActions.map((action) => (
+              <button 
+                key={action.label}
+                className={`${action.color} hover:opacity-90 text-white p-2 sm:p-2.5 rounded-xl transition-all shadow-lg shadow-blue-200 flex items-center gap-2 px-3 sm:px-4 text-[12px] sm:text-[13px] font-bold shrink-0`}
+                onClick={action.onClick}
+              >
+                <action.icon size={16} />
+                <span className="hidden md:inline">{action.label}</span>
+                <span className="md:hidden">{action.label.split(' ')[0]}</span>
+              </button>
+            ))}
+          </div>
+        }
+      />
+
+      {currentUser?.email?.toLowerCase() === 'kartikkhandelwal1104@gmail.com' && (
+        <div className="mb-6 bg-blue-600 rounded-2xl p-6 text-white relative overflow-hidden shadow-xl shadow-blue-200">
+          <div className="relative z-10 flex flex-col md:flex-row md:items-center justify-between gap-4">
+            <div>
+              <h3 className="text-xl font-bold mb-1 flex items-center gap-2">
+                <Sparkles size={20} /> Demo Environment Active
+              </h3>
+              <p className="text-blue-100 text-[14px]">
+                You are logged in as a demo user. Feel free to explore all features, including AI-powered inbox and task management.
+              </p>
+            </div>
+            <div className="flex gap-3">
+              <button 
+                onClick={() => navigate('/settings')}
+                className="bg-white text-blue-600 px-4 py-2 rounded-lg text-[13px] font-bold hover:bg-blue-50 transition-colors"
+              >
+                Explore Settings
+              </button>
+            </div>
+          </div>
+          {/* Decorative circles */}
+          <div className="absolute top-[-20px] right-[-20px] w-32 h-32 bg-white/10 rounded-full blur-2xl" />
+          <div className="absolute bottom-[-20px] left-[20%] w-24 h-24 bg-blue-400/20 rounded-full blur-xl" />
+        </div>
+      )}
+
+      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4 mb-8">
         {stats.map((s, i) => (
           <motion.div 
             key={s.label} 
             initial={{ opacity: 0, y: 10 }}
             animate={{ opacity: 1, y: 0 }}
             transition={{ duration: 0.3, delay: i * 0.05 }}
-            className="bg-white rounded-xl border border-gray-200 p-4.5 cursor-pointer hover:shadow-md hover:-translate-y-[1px] transition-all relative overflow-hidden group"
+            onClick={() => handleStatClick(s)}
+            className="bg-white rounded-xl border p-5 cursor-pointer hover:shadow-lg transition-all relative overflow-hidden group border-gray-200"
           >
-            <div className="absolute top-0 left-0 right-0 h-[3px]" style={{ background: s.color }} />
-            <div className="flex items-center justify-between">
-              <span className="text-[12.5px] text-gray-500 font-medium">{s.label}</span>
-              <div className="w-8 h-8 rounded-lg flex items-center justify-center" style={{ background: s.color + '18', color: s.color }}>
-                <s.icon size={15} />
+            <div className="absolute top-0 left-0 right-0 h-[4px]" style={{ background: s.color }} />
+            <div className="flex items-center justify-between mb-3">
+              <span className="text-[13px] text-gray-500 font-semibold uppercase tracking-wider">{s.label}</span>
+              <div className="w-9 h-9 rounded-xl flex items-center justify-center transition-transform group-hover:scale-110" style={{ background: s.color + '18', color: s.color }}>
+                <s.icon size={18} />
               </div>
             </div>
-            <div className="font-serif text-[34px] font-semibold leading-none my-2" style={{ color: s.color }}>{s.num}</div>
-            <div className="text-[11px] font-semibold mt-1.5 text-gray-400">{s.sub}</div>
+            <div className="flex items-baseline gap-2">
+              <div className="font-serif text-[38px] font-bold leading-none" style={{ color: s.color }}>{s.num}</div>
+              <div className="text-[12px] font-bold text-gray-400">{s.sub}</div>
+            </div>
+            <div className="mt-4 pt-4 border-t border-gray-50 flex items-center justify-between text-[11px] font-bold text-gray-400 group-hover:text-blue-600 transition-colors">
+              <span>VIEW IN TASK MANAGER</span>
+              <ArrowRight size={12} />
+            </div>
           </motion.div>
         ))}
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-5 mb-5">
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-5 mb-5">
         <motion.div 
           initial={{ opacity: 0, y: 10 }}
           animate={{ opacity: 1, y: 0 }}
           transition={{ duration: 0.3, delay: 0.2 }}
-          className="bg-white rounded-xl border border-gray-200 overflow-hidden flex flex-col shadow-sm"
+          className="bg-white rounded-xl border border-gray-200 overflow-hidden flex flex-col shadow-sm lg:col-span-2"
         >
           <div className="flex items-center gap-2.5 p-4 border-b border-gray-200">
             <AlertCircle size={15} className="text-red-600" />
@@ -92,32 +188,55 @@ export function DashboardPage() {
             {overdue.slice(0, 5).map(t => {
               const c = clients.find(x => x.id === t.clientId);
               const a = users.find(x => x.id === t.assigneeId);
+              const tt = taskTypes.find(type => type.name === t.type);
+              
               return (
-                <div key={t.id} className="flex items-center gap-2.5 px-4.5 py-2.5 border-b border-gray-100 hover:bg-gray-50 cursor-pointer transition-colors" onClick={() => openEditTask(t)}>
-                  <TypeChip type={t.type} />
+                <div key={t.id} className="flex items-center gap-2.5 px-4.5 py-2.5 border-b border-gray-100 hover:bg-gray-50 cursor-pointer transition-colors group" onClick={() => openEditTask(t)}>
+                  <div className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0" style={{ backgroundColor: `${tt?.color || '#3b82f6'}15`, color: tt?.color || '#3b82f6' }}>
+                    <FileText size={16} />
+                  </div>
                   <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2">
-                      <span className="text-[10px] font-mono text-gray-400">#{t.id}</span>
-                      <div className="font-medium text-[13px] truncate text-gray-900">{t.title}</div>
+                    <div className="flex items-center gap-2 mb-0.5">
+                      <span className="text-[10px] font-mono text-gray-400 bg-gray-50 px-1 rounded border border-gray-100">#{t.id}</span>
+                      <div className="font-medium text-[13px] truncate text-gray-900 group-hover:text-blue-600 transition-colors">{t.title}</div>
                       {t.subtasks && t.subtasks.length > 0 && (
-                        <div className="flex items-center gap-1 text-[10px] text-gray-400 bg-gray-100 px-1.5 py-0.5 rounded shrink-0" title={`${t.subtasks.filter(s => s.done).length}/${t.subtasks.length} subtasks done`}>
-                          <GitMerge size={10} />
+                        <div className="flex items-center gap-1 text-[10px] text-gray-400 bg-gray-100 px-1.5 py-0.5 rounded shrink-0" title={`${t.subtasks.filter(s => s.done).length}/${t.subtasks.length} checklist items done`}>
+                          <CheckCircle2 size={10} />
                           <span>{t.subtasks.filter(s => s.done).length}/{t.subtasks.length}</span>
                         </div>
                       )}
+                      {tasks.filter(ct => ct.parentId === t.id).length > 0 && (
+                        <div className="flex items-center gap-1 text-[10px] text-gray-400 bg-gray-100 px-1.5 py-0.5 rounded shrink-0" title={`${tasks.filter(ct => ct.parentId === t.id && ct.status === 'Completed').length}/${tasks.filter(ct => ct.parentId === t.id).length} linked subtasks done`}>
+                          <GitMerge size={10} />
+                          <span>{tasks.filter(ct => ct.parentId === t.id && ct.status === 'Completed').length}/{tasks.filter(ct => ct.parentId === t.id).length}</span>
+                        </div>
+                      )}
                     </div>
-                    <div className="text-[11px] text-gray-500">{c?.name || '—'}</div>
+                    <div className="flex items-center gap-2">
+                      <div className="text-[11px] text-gray-500 truncate max-w-[120px]">{c?.name || '—'}</div>
+                      {t.tags && t.tags.length > 0 && (
+                        <div className="flex items-center gap-1 overflow-hidden">
+                          {t.tags.slice(0, 2).map(tag => (
+                            <span key={tag} className="text-[9px] px-1.5 py-0.25 bg-gray-100 text-gray-500 rounded-full border border-gray-200 uppercase tracking-wider font-semibold">
+                              {tag}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                    </div>
                   </div>
-                  <span className="inline-flex items-center gap-1 bg-red-50 text-red-600 text-[10.5px] font-bold px-1.5 py-0.5 rounded">
-                    {Math.abs(daysLeft(t.dueDate) || 0)}d
-                  </span>
-                  <Avatar user={a} size={24} />
+                  <div className="flex flex-col items-end gap-1">
+                    <span className="inline-flex items-center gap-1 bg-red-50 text-red-600 text-[10.5px] font-bold px-1.5 py-0.5 rounded">
+                      {Math.abs(daysLeft(t.dueDate) || 0)}d
+                    </span>
+                    <Avatar user={a} size={20} />
+                  </div>
                   <button 
-                    className="ml-2 w-6 h-6 rounded-full border border-gray-200 flex items-center justify-center text-gray-400 hover:bg-emerald-50 hover:text-emerald-600 hover:border-emerald-200 transition-colors"
+                    className="ml-1 w-7 h-7 rounded-full border border-gray-200 flex items-center justify-center text-gray-400 hover:bg-emerald-50 hover:text-emerald-600 hover:border-emerald-200 transition-colors shrink-0"
                     onClick={(e) => markComplete(t.id, e)}
                     title="Mark Complete"
                   >
-                    <CheckCircle size={12} />
+                    <CheckCircle size={14} />
                   </button>
                 </div>
               );
@@ -125,6 +244,73 @@ export function DashboardPage() {
           </div>
         </motion.div>
 
+        <motion.div 
+          initial={{ opacity: 0, y: 10 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.3, delay: 0.25 }}
+          className="bg-white rounded-xl border border-gray-200 overflow-hidden flex flex-col shadow-sm"
+        >
+          <div className="flex items-center gap-2.5 p-4 border-b border-gray-200">
+            <Zap size={15} className="text-blue-600" />
+            <h3 className="text-[14px] font-semibold flex-1">KDK Sync</h3>
+            <div className="flex items-center gap-1.5">
+              <span className="relative flex h-2 w-2">
+                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
+              </span>
+              <span className="text-[11px] font-bold text-emerald-600 uppercase tracking-wider">Live</span>
+            </div>
+          </div>
+          <div className="p-5 flex flex-col gap-4">
+            <div className="text-[12px] text-gray-600 leading-relaxed">
+              Automated connection with <span className="font-bold text-gray-900">KDK Sync</span> for real-time compliance tracking and direct filing.
+            </div>
+            
+            <div className="bg-gray-50 rounded-xl p-3.5 border border-gray-100">
+              <div className="flex items-center justify-between mb-2.5">
+                <div className="flex flex-col">
+                  <span className="text-[12px] font-bold text-gray-800">ITR Filing Progress</span>
+                  <span className="text-[10px] text-gray-500">Overall practice status</span>
+                </div>
+                <span className="text-[11px] font-bold text-emerald-600 bg-emerald-50 px-1.5 py-0.5 rounded">85%</span>
+              </div>
+              <div className="w-full bg-gray-200 rounded-full h-2">
+                <div className="bg-emerald-500 h-2 rounded-full transition-all duration-1000" style={{ width: '85%' }}></div>
+              </div>
+              <div className="flex justify-between mt-2">
+                <span className="text-[10px] font-medium text-gray-500">120/141 Filed</span>
+                <span className="text-[10px] font-medium text-amber-600">21 Pending</span>
+              </div>
+            </div>
+
+            <div className="bg-gray-50 rounded-xl p-3.5 border border-gray-100">
+              <div className="flex items-center justify-between mb-2.5">
+                <div className="flex flex-col">
+                  <span className="text-[12px] font-bold text-gray-800">GST Returns</span>
+                  <span className="text-[10px] text-gray-500">Current month filing</span>
+                </div>
+                <span className="text-[11px] font-bold text-blue-600 bg-blue-50 px-1.5 py-0.5 rounded">92%</span>
+              </div>
+              <div className="w-full bg-gray-200 rounded-full h-2">
+                <div className="bg-blue-500 h-2 rounded-full transition-all duration-1000" style={{ width: '92%' }}></div>
+              </div>
+              <div className="flex justify-between mt-2">
+                <span className="text-[10px] font-medium text-gray-500">66/72 Filed</span>
+                <span className="text-[10px] font-medium text-blue-600">Syncing...</span>
+              </div>
+            </div>
+
+            <button 
+              onClick={() => navigate('/compliance')}
+              className="mt-auto w-full py-2 bg-blue-50 text-blue-600 hover:bg-blue-100 rounded-lg text-[13px] font-bold transition-colors flex items-center justify-center gap-2"
+            >
+              <Zap size={14} /> View Compliance
+            </button>
+          </div>
+        </motion.div>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-5 mb-5">
         <motion.div 
           initial={{ opacity: 0, y: 10 }}
           animate={{ opacity: 1, y: 0 }}
@@ -143,15 +329,15 @@ export function DashboardPage() {
               const dl = daysLeft(m.date) || 0;
               return (
                 <div key={m.id} className="bg-white border border-gray-200 rounded-xl p-3.5 mb-2 hover:shadow-md transition-shadow border-l-[3px]" style={{ borderLeftColor: dl === 0 ? '#dc2626' : dl <= 2 ? '#d97706' : '#2563eb' }}>
-                  <div className="flex justify-between mb-1">
-                    <span className="font-semibold text-[13px]">{m.title}</span>
-                    <span className="bg-blue-50 text-blue-600 px-2 py-0.5 rounded text-[10px] font-bold">
+                  <div className="flex justify-between items-start gap-2 mb-1">
+                    <span className="font-semibold text-[13px] leading-tight">{m.title}</span>
+                    <span className="bg-blue-50 text-blue-600 px-2 py-0.5 rounded text-[10px] font-bold shrink-0">
                       {dl === 0 ? 'Today' : dl === 1 ? 'Tomorrow' : new Date(m.date).toLocaleDateString('en-IN', { day: 'numeric', month: 'short' })}
                     </span>
                   </div>
-                  <div className="flex items-center justify-between mt-2">
-                    <div className="flex gap-3 text-[11px] text-gray-500">
-                      <span>{c?.name || '—'}</span>
+                  <div className="flex items-start sm:items-center justify-between mt-2 gap-2">
+                    <div className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px] text-gray-500">
+                      <span className="truncate max-w-[140px]">{c?.name || '—'}</span>
                       <span>{m.time}</span>
                       <span>{m.duration}min</span>
                       <span className="capitalize">{m.platform || m.type}</span>
@@ -161,7 +347,7 @@ export function DashboardPage() {
                         href={m.meetLink} 
                         target="_blank" 
                         rel="noreferrer"
-                        className="text-[11px] font-medium text-blue-600 hover:text-blue-700 bg-blue-50 hover:bg-blue-100 px-2 py-1 rounded flex items-center gap-1 transition-colors"
+                        className="text-[11px] font-medium text-blue-600 hover:text-blue-700 bg-blue-50 hover:bg-blue-100 px-2 py-1 rounded inline-flex items-center justify-center gap-1 transition-colors shrink-0 mt-0.5 sm:mt-0"
                       >
                         Join <ExternalLink size={10} />
                       </a>
@@ -172,9 +358,7 @@ export function DashboardPage() {
             })}
           </div>
         </motion.div>
-      </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
         <motion.div 
           initial={{ opacity: 0, y: 10 }}
           animate={{ opacity: 1, y: 0 }}
@@ -183,17 +367,24 @@ export function DashboardPage() {
         >
           <div className="flex items-center gap-2.5 p-4 border-b border-gray-200">
             <ShieldAlert size={15} className="text-amber-600" />
-            <h3 className="text-[14px] font-semibold flex-1">Compliance Deadlines — Next 7 Days</h3>
+            <h3 className="text-[14px] font-semibold flex-1">Compliance Deadlines</h3>
           </div>
           <div className="overflow-y-auto max-h-[300px]">
             {urgent.length === 0 && <div className="flex flex-col items-center justify-center p-8 text-gray-500"><p>No urgent deadlines.</p></div>}
             {urgent.map(d => {
               const dl = daysLeft(d.dueDate) || 0;
               return (
-                <div key={d.id} className="flex items-center gap-2.5 px-4.5 py-2.5 border-b border-gray-100">
-                  <TypeChip type={d.category} />
+                <div key={d.id} className="flex items-center gap-2.5 px-4.5 py-2.5 border-b border-gray-100 group hover:bg-gray-50 transition-colors">
+                  <div className="w-8 h-8 rounded-lg bg-amber-50 text-amber-600 flex items-center justify-center shrink-0">
+                    <ShieldAlert size={16} />
+                  </div>
                   <div className="flex-1 min-w-0">
-                    <div className="font-medium text-[13px]">{d.title}</div>
+                    <div className="flex items-center gap-2 mb-0.5">
+                      <div className="font-medium text-[13px] text-gray-900">{d.title}</div>
+                      <span className="text-[9px] px-1.5 py-0.25 bg-gray-100 text-gray-500 rounded-full border border-gray-200 uppercase tracking-wider font-semibold">
+                        {d.category}
+                      </span>
+                    </div>
                     <div className="text-[11px] text-gray-500">{d.clients} clients · {d.form}</div>
                   </div>
                   <span className={`px-2 py-0.5 rounded text-[11px] font-bold ${dl <= 3 ? 'bg-red-50 text-red-600' : 'bg-amber-50 text-amber-600'}`}>
@@ -208,27 +399,112 @@ export function DashboardPage() {
         <motion.div 
           initial={{ opacity: 0, y: 10 }}
           animate={{ opacity: 1, y: 0 }}
-          transition={{ duration: 0.3, delay: 0.35 }}
+          transition={{ duration: 0.3, delay: 0.32 }}
           className="bg-white rounded-xl border border-gray-200 overflow-hidden flex flex-col shadow-sm"
         >
           <div className="flex items-center gap-2.5 p-4 border-b border-gray-200">
-            <Users size={15} className="text-purple-600" />
-            <h3 className="text-[14px] font-semibold flex-1">Team Workload</h3>
+            <ShieldAlert size={15} className="text-amber-600" />
+            <h3 className="text-[14px] font-semibold flex-1">Awaiting Client Info</h3>
+            <span className="bg-amber-50 text-amber-600 px-2 py-0.5 rounded-md text-[11px] font-bold">{awaitingInfo.length}</span>
           </div>
-          <div className="p-4.5 overflow-y-auto max-h-[300px]">
-            {users.map(u => {
-              const ut = tasks.filter(t => t.assigneeId === u.id && t.status !== 'Completed');
-              const max = Math.max(...users.map(x => tasks.filter(t => t.assigneeId === x.id && t.status !== 'Completed').length), 1);
+          <div className="overflow-y-auto max-h-[300px]">
+            {awaitingInfo.length === 0 && <div className="flex flex-col items-center justify-center p-8 text-gray-500"><p>No tasks blocked by clients.</p></div>}
+            {awaitingInfo.slice(0, 5).map(t => {
+              const c = clients.find(x => x.id === t.clientId);
+              const a = users.find(x => x.id === t.assigneeId);
+              const tt = taskTypes.find(type => type.name === t.type);
+              
               return (
-                <div key={u.id} className="mb-3 last:mb-0">
-                  <div className="flex items-center gap-2 mb-1">
-                    <Avatar user={u} size={24} />
-                    <span className="text-[13px] font-medium flex-1">{u.name}</span>
-                    <span className="text-[12px] text-gray-500">{ut.length} active</span>
+                <div key={t.id} className="flex items-center gap-2.5 px-4.5 py-2.5 border-b border-gray-100 hover:bg-gray-50 cursor-pointer transition-colors group" onClick={() => openEditTask(t)}>
+                  <div className="w-8 h-8 rounded-lg flex items-center justify-center shrink-0" style={{ backgroundColor: `${tt?.color || '#3b82f6'}15`, color: tt?.color || '#3b82f6' }}>
+                    <FileText size={16} />
                   </div>
-                  <div className="h-1.5 bg-gray-100 rounded-full overflow-hidden">
-                    <div className="h-full rounded-full transition-all duration-500" style={{ width: `${pct(ut.length, max)}%`, background: u.color }} />
+                  <div className="flex-1 min-w-0">
+                    <div className="flex items-center gap-2 mb-0.5">
+                      <span className="text-[10px] font-mono text-gray-400 bg-gray-50 px-1 rounded border border-gray-100">#{t.id}</span>
+                      <div className="font-medium text-[13px] truncate text-gray-900 group-hover:text-blue-600 transition-colors">{t.title}</div>
+                    </div>
+                    <div className="flex items-center gap-2">
+                      <div className="text-[11px] text-gray-500 truncate max-w-[120px]">{c?.name || '—'}</div>
+                      {t.tags && t.tags.length > 0 && (
+                        <div className="flex items-center gap-1 overflow-hidden">
+                          {t.tags.slice(0, 2).map(tag => (
+                            <span key={tag} className="text-[9px] px-1.5 py-0.25 bg-gray-100 text-gray-500 rounded-full border border-gray-200 uppercase tracking-wider font-semibold">
+                              {tag}
+                            </span>
+                          ))}
+                        </div>
+                      )}
+                    </div>
                   </div>
+                  <Avatar user={a} size={20} />
+                  <button 
+                    className="ml-2 px-2 py-1 rounded-md border border-gray-200 text-[10px] font-bold text-gray-600 hover:bg-blue-50 hover:text-blue-600 hover:border-blue-200 transition-colors shrink-0"
+                    onClick={(e) => { e.stopPropagation(); openEditTask(t); }}
+                  >
+                    Follow Up
+                  </button>
+                </div>
+              );
+            })}
+          </div>
+        </motion.div>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-5">
+
+        <motion.div 
+          initial={{ opacity: 0, y: 10 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.3, delay: 0.35 }}
+          className="bg-white rounded-xl border border-gray-200 overflow-hidden flex flex-col shadow-sm lg:col-span-2"
+        >
+          <div className="flex items-center gap-2.5 p-4 border-b border-gray-200">
+            <Users size={15} className="text-purple-600" />
+            <h3 className="text-[14px] font-semibold flex-1">Team Workload & Insights</h3>
+          </div>
+          <div className="p-4 grid grid-cols-1 md:grid-cols-2 xl:grid-cols-4 gap-4">
+            {users.map(u => {
+              const uTasks = tasks.filter(t => t.assigneeId === u.id && t.status !== 'Completed');
+              const uOverdue = uTasks.filter(t => (daysLeft(t.dueDate) ?? 0) < 0);
+              const uDueSoon = uTasks.filter(t => (daysLeft(t.dueDate) ?? -1) >= 0 && (daysLeft(t.dueDate) ?? 8) <= 7);
+              const uAwaiting = uTasks.filter(t => t.status === 'Awaiting Info');
+              
+              return (
+                <div key={u.id} className="border border-gray-100 rounded-xl p-3.5 hover:shadow-md transition-shadow bg-gray-50/30 flex flex-col">
+                  <div className="flex items-center gap-3 mb-3">
+                    <Avatar user={u} size={32} />
+                    <div className="flex-1 min-w-0">
+                      <div className="text-[13px] font-bold text-gray-900 truncate">{u.name}</div>
+                      <div className="text-[11px] text-gray-500 truncate">{u.designation}</div>
+                    </div>
+                  </div>
+                  
+                  <div className="grid grid-cols-2 gap-2 mb-4 flex-1">
+                    <div className="bg-white border border-gray-100 rounded-lg p-2 flex flex-col items-center justify-center">
+                      <span className="text-[18px] font-bold text-gray-700">{uTasks.length}</span>
+                      <span className="text-[10px] text-gray-500 uppercase font-semibold">Active</span>
+                    </div>
+                    <div className="bg-red-50 border border-red-100 rounded-lg p-2 flex flex-col items-center justify-center">
+                      <span className="text-[18px] font-bold text-red-600">{uOverdue.length}</span>
+                      <span className="text-[10px] text-red-600/80 uppercase font-semibold">Overdue</span>
+                    </div>
+                    <div className="bg-blue-50 border border-blue-100 rounded-lg p-2 flex flex-col items-center justify-center">
+                      <span className="text-[18px] font-bold text-blue-600">{uDueSoon.length}</span>
+                      <span className="text-[10px] text-blue-600/80 uppercase font-semibold">Due Soon</span>
+                    </div>
+                    <div className="bg-amber-50 border border-amber-100 rounded-lg p-2 flex flex-col items-center justify-center">
+                      <span className="text-[18px] font-bold text-amber-600">{uAwaiting.length}</span>
+                      <span className="text-[10px] text-amber-600/80 uppercase font-semibold">Blocked</span>
+                    </div>
+                  </div>
+                  
+                  <button 
+                    onClick={() => navigate(`/tasks?assignee=${u.id}`)}
+                    className="w-full py-2 bg-white border border-gray-200 rounded-lg text-[12px] font-semibold text-gray-700 hover:bg-gray-50 hover:text-blue-600 transition-colors flex items-center justify-center gap-1"
+                  >
+                    View Tasks <ArrowRight size={12} />
+                  </button>
                 </div>
               );
             })}

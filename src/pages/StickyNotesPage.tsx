@@ -1,15 +1,19 @@
 import React, { useState } from 'react';
 import { useApp } from '../context/AppContext';
 import { useToast } from '../context/ToastContext';
-import { Plus, Search, Star, Trash2, StickyNote as StickyNoteIcon, X } from 'lucide-react';
+import { useConfirm } from '../context/ConfirmContext';
+import { Plus, Search, Star, Trash2, StickyNote as StickyNoteIcon, X, Clock, Zap } from 'lucide-react';
+import { PageHeader } from '../components/ui/PageHeader';
 import { Modal } from '../components/ui/Modal';
 import { Toggle } from '../components/ui/Toggle';
-import { genId, fmt, today, NOTE_COLORS } from '../utils';
+import { MentionTextarea } from '../components/ui/MentionTextarea';
+import { genUUID, fmt, today, NOTE_COLORS } from '../utils';
 import { Note } from '../types';
 
 export function StickyNotesPage() {
-  const { notes, setNotes } = useApp();
+  const { notes, users, notify, addNote, updateNote, deleteNote } = useApp();
   const toast = useToast();
+  const { confirm } = useConfirm();
 
   const [search, setSearch] = useState('');
   const [modal, setModal] = useState(false);
@@ -26,7 +30,7 @@ export function StickyNotesPage() {
 
   const openNew = () => {
     setForm({ 
-      id: genId(), 
+      id: genUUID(), 
       title: '', 
       content: '', 
       color: NOTE_COLORS[Math.floor(Math.random() * NOTE_COLORS.length)], 
@@ -42,26 +46,51 @@ export function StickyNotesPage() {
     setModal(true);
   };
 
-  const save = () => {
+  const save = async () => {
     if (!form?.title.trim() && !form?.content.trim()) { toast('Note is empty', 'error'); return; }
     const updated = { ...form, updatedAt: fmt(today) };
-    if (notes.find(n => n.id === form.id)) {
-      setNotes(n => n.map(x => x.id === form.id ? updated : x));
-    } else {
-      setNotes(n => [updated, ...n]);
+    try {
+      if (notes.find(n => n.id === form.id)) {
+        await updateNote(form.id, updated);
+      } else {
+        await addNote(updated);
+      }
+      toast('Note saved', 'success');
+      setModal(false);
+      setForm(null);
+    } catch (error) {
+      console.error('Error saving note:', error);
+      toast('Failed to save note', 'error');
     }
-    toast('Note saved', 'success');
-    setModal(false);
-    setForm(null);
   };
 
-  const del = (id: string) => {
-    setNotes(n => n.filter(x => x.id !== id));
-    toast('Note deleted');
+  const del = async (id: string) => {
+    try {
+      await deleteNote(id);
+      toast('Note deleted');
+    } catch (error) {
+      console.error('Error deleting note:', error);
+      toast('Failed to delete note', 'error');
+    }
   };
 
-  const togglePin = (id: string) => {
-    setNotes(n => n.map(x => x.id === id ? { ...x, pinned: !x.pinned } : x));
+  const togglePin = async (id: string) => {
+    const note = notes.find(n => n.id === id);
+    if (!note) return;
+    try {
+      await updateNote(id, { pinned: !note.pinned });
+    } catch (error) {
+      console.error('Error toggling pin:', error);
+      toast('Failed to update note', 'error');
+    }
+  };
+
+  const handleMention = (userId: string) => {
+    const user = users.find(u => u.id === userId);
+    if (user) {
+      notify(userId, `You were mentioned in a sticky note: ${form?.title || 'Untitled'}`, 'mention', '/sticky-notes');
+      toast(`Mentioned ${user.name}`);
+    }
   };
 
   const NoteCard = ({ n }: { n: Note }) => (
@@ -81,7 +110,10 @@ export function StickyNotesPage() {
           </button>
           <button 
             className="w-6 h-6 rounded flex items-center justify-center text-black/30 hover:text-black/60 transition-colors"
-            onClick={() => { if (confirm('Delete note?')) del(n.id); }}
+            onClick={async (e) => { 
+              e.stopPropagation();
+              if (await confirm({ title: 'Delete Note', message: 'Are you sure you want to delete this note?', danger: true })) del(n.id); 
+            }}
           >
             <Trash2 size={13} />
           </button>
@@ -94,18 +126,18 @@ export function StickyNotesPage() {
 
   return (
     <div className="animate-slide-up">
-      <div className="flex items-start gap-3 mb-5">
-        <div className="flex-1">
-          <h1 className="font-serif text-[22px] font-semibold text-gray-900">Sticky Notes</h1>
-          <p className="text-[13px] text-gray-500 mt-0.5">Quick notes and reminders for your practice</p>
-        </div>
-        <button className="bg-blue-600 hover:bg-blue-700 text-white px-3.5 py-2 rounded-lg text-[13px] font-medium flex items-center gap-1.5 transition-colors" onClick={openNew}>
-          <Plus size={15} /> New Note
-        </button>
-      </div>
+      <PageHeader 
+        title="Sticky Notes" 
+        description="Quick notes and reminders for your practice"
+        action={
+          <button className="bg-blue-600 hover:bg-blue-700 text-white px-3 sm:px-4 py-2 sm:py-2.5 rounded-xl text-[13px] sm:text-[14px] font-bold flex items-center gap-2 transition-all shadow-lg shadow-blue-200" onClick={openNew}>
+            <Plus size={18} /> <span className="hidden sm:inline">New Note</span><span className="sm:hidden">New</span>
+          </button>
+        }
+      />
 
       <div className="mb-6">
-        <div className="flex items-center gap-2 bg-white border border-gray-200 rounded-lg px-3 py-1.5 w-[260px] focus-within:border-blue-600 transition-colors">
+        <div className="flex items-center gap-2 bg-white border border-gray-200 rounded-lg px-3 py-1.5 w-full sm:w-[260px] focus-within:border-blue-600 transition-colors">
           <Search size={14} className="text-gray-400 shrink-0" />
           <input 
             placeholder="Search notes..." 
@@ -171,11 +203,12 @@ export function StickyNotesPage() {
           </div>
           <div className="mb-4">
             <label className="block text-[11.5px] font-semibold text-gray-500 mb-1.5">Content</label>
-            <textarea 
+            <MentionTextarea 
               className="w-full px-3 py-2 border border-gray-200 rounded-lg text-[13.5px] outline-none focus:border-blue-600 focus:ring-2 focus:ring-blue-600/10 min-h-[120px] resize-y" 
-              placeholder="Write your note here..." 
+              placeholder="Write your note here... Use @ to mention users" 
               value={form.content} 
               onChange={e => setForm(f => f ? { ...f, content: e.target.value } : null)} 
+              onMention={handleMention}
             />
           </div>
           <div className="mb-5">

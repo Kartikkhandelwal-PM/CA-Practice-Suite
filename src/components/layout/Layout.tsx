@@ -12,7 +12,7 @@ export function Layout() {
       <Sidebar />
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
         <Topbar />
-        <main className="flex-1 overflow-y-auto p-6 relative">
+        <main className="flex-1 overflow-y-auto p-4 md:p-6 pb-12 relative flex flex-col">
           <AnimatePresence mode="wait">
             <motion.div
               key={location.pathname}
@@ -20,7 +20,7 @@ export function Layout() {
               animate={{ opacity: 1, y: 0 }}
               exit={{ opacity: 0, y: -10 }}
               transition={{ duration: 0.2 }}
-              className="h-full"
+              className="flex-1 flex flex-col"
             >
               <Outlet />
             </motion.div>

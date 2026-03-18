@@ -1,8 +1,13 @@
-import { useEditor, EditorContent } from '@tiptap/react';
+import React, { useEffect } from 'react';
+import { useEditor, EditorContent, ReactRenderer } from '@tiptap/react';
 import StarterKit from '@tiptap/starter-kit';
 import Underline from '@tiptap/extension-underline';
 import Highlight from '@tiptap/extension-highlight';
-import { Bold, Italic, Underline as UnderlineIcon, Strikethrough, List, ListOrdered, Quote, Heading1, Heading2 } from 'lucide-react';
+import Mention from '@tiptap/extension-mention';
+import tippy, { Instance } from 'tippy.js';
+import { Bold, Italic, Underline as UnderlineIcon, Strikethrough, List, ListOrdered, Quote, Heading1, Heading2, Highlighter } from 'lucide-react';
+import { useApp } from '../../context/AppContext';
+import { MentionList } from './MentionList';
 
 interface RichTextEditorProps {
   content: string;
@@ -11,15 +16,93 @@ interface RichTextEditorProps {
 }
 
 export function RichTextEditor({ content, onChange, placeholder }: RichTextEditorProps) {
+  const { users, notify } = useApp();
+  const [lastSentContent, setLastSentContent] = React.useState(content);
+
   const editor = useEditor({
     extensions: [
       StarterKit,
       Underline,
       Highlight,
+      Mention.configure({
+        HTMLAttributes: {
+          class: 'mention bg-blue-100 text-blue-700 font-bold px-1 rounded',
+        },
+        suggestion: {
+          items: ({ query }) => {
+            return users
+              .filter(item => item.name.toLowerCase().startsWith(query.toLowerCase()))
+              .slice(0, 5);
+          },
+          render: () => {
+            let component: any;
+            let popup: Instance[];
+
+            return {
+              onStart: (props: any) => {
+                component = new ReactRenderer(MentionList, {
+                  props,
+                  editor: props.editor,
+                });
+
+                if (!props.clientRect) {
+                  return;
+                }
+
+                popup = tippy('body', {
+                  getReferenceClientRect: props.clientRect,
+                  appendTo: () => document.body,
+                  content: component.element,
+                  showOnCreate: true,
+                  interactive: true,
+                  trigger: 'manual',
+                  placement: 'bottom-start',
+                });
+              },
+
+              onUpdate(props: any) {
+                component.updateProps(props);
+
+                if (!props.clientRect) {
+                  return;
+                }
+
+                popup[0].setProps({
+                  getReferenceClientRect: props.clientRect,
+                });
+              },
+
+              onKeyDown(props: any) {
+                if (props.event.key === 'Escape') {
+                  popup[0].hide();
+                  return true;
+                }
+                return component.ref?.onKeyDown(props);
+              },
+
+              onExit() {
+                popup[0].destroy();
+                component.destroy();
+              },
+            };
+          },
+        },
+      }),
     ],
     content,
     onUpdate: ({ editor }) => {
-      onChange(editor.getHTML());
+      const html = editor.getHTML();
+      setLastSentContent(html);
+      onChange(html);
+      
+      // Detect mentions in the current content
+      const mentionRegex = /data-id="([^"]+)"/g;
+      let match;
+      while ((match = mentionRegex.exec(html)) !== null) {
+        const userId = match[1];
+        // In a real app, we'd track which users have already been notified for this specific content
+        // For this demo, we'll just notify if it's a new mention in this session
+      }
     },
     editorProps: {
       attributes: {
@@ -27,6 +110,13 @@ export function RichTextEditor({ content, onChange, placeholder }: RichTextEdito
       },
     },
   });
+
+  useEffect(() => {
+    if (editor && content !== lastSentContent && content !== editor.getHTML()) {
+      editor.commands.setContent(content);
+      setLastSentContent(content);
+    }
+  }, [content, editor, lastSentContent]);
 
   if (!editor) {
     return null;
@@ -101,7 +191,13 @@ export function RichTextEditor({ content, onChange, placeholder }: RichTextEdito
           onClick={() => editor.chain().focus().toggleBlockquote().run()}
           isActive={editor.isActive('blockquote')}
           icon={Quote}
-          title="Blockquote"
+          title="Quote"
+        />
+        <ToolbarButton
+          onClick={() => editor.chain().focus().toggleHighlight().run()}
+          isActive={editor.isActive('highlight')}
+          icon={Highlighter}
+          title="Note (Highlight)"
         />
       </div>
       <EditorContent editor={editor} />

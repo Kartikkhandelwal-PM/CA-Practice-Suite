@@ -1,16 +1,19 @@
 import React, { useState } from 'react';
 import { useApp } from '../context/AppContext';
 import { useToast } from '../context/ToastContext';
-import { Plus, Edit2, Trash2, X, GripVertical } from 'lucide-react';
+import { useConfirm } from '../context/ConfirmContext';
+import { Plus, Edit2, Trash2, X, GripVertical, LayoutTemplate, Clock, CheckCircle2, AlertCircle } from 'lucide-react';
 import { TypeChip } from '../components/ui/Badges';
 import { Modal } from '../components/ui/Modal';
 import { TaskModal } from '../components/ui/TaskModal';
-import { genId, today, fmt } from '../utils';
+import { genUUID, today, fmt } from '../utils';
 import { Template, Task } from '../types';
+import { PageHeader } from '../components/ui/PageHeader';
 
 export function TemplatesPage() {
-  const { templates, setTemplates, tasks } = useApp();
+  const { templates, tasks, addTemplate, updateTemplate, deleteTemplate } = useApp();
   const toast = useToast();
+  const { confirm } = useConfirm();
 
   const [filter, setFilter] = useState('');
   const [modal, setModal] = useState<'view' | 'create' | 'edit' | null>(null);
@@ -22,7 +25,7 @@ export function TemplatesPage() {
   const filtered = templates.filter(t => !filter || t.category === filter || filter === 'All');
 
   const openCreate = () => {
-    setForm({ id: genId(), name: '', category: 'GST', recurring: 'Monthly', estHours: '', description: '', subtasks: [], color: '#2563eb' });
+    setForm({ id: genUUID(), name: '', category: 'GST', recurring: 'Monthly', estHours: '', description: '', subtasks: [], color: '#2563eb' });
     setModal('create');
   };
   
@@ -39,7 +42,7 @@ export function TemplatesPage() {
       type: t.category,
       description: t.description,
       recurring: t.recurring,
-      subtasks: t.subtasks.map(s => ({ id: genId(), title: s, done: false })),
+      subtasks: t.subtasks.map(s => ({ id: genUUID(), title: s, done: false })),
       status: 'To Do',
       dueDate: fmt(today),
       tags: [],
@@ -52,22 +55,32 @@ export function TemplatesPage() {
     setModal(null);
   };
 
-  const saveTmpl = () => {
+  const saveTmpl = async () => {
     if (!form?.name.trim()) { toast('Template name required', 'error'); return; }
-    if (modal === 'create') {
-      setTemplates(t => [...t, form]);
-    } else {
-      setTemplates(t => t.map(x => x.id === form.id ? form : x));
+    try {
+      if (modal === 'create') {
+        await addTemplate(form);
+      } else {
+        await updateTemplate(form.id, form);
+      }
+      toast(modal === 'create' ? 'Template created' : 'Template updated', 'success');
+      setModal(null);
+      setForm(null);
+    } catch (error) {
+      console.error('Error saving template:', error);
+      toast('Failed to save template', 'error');
     }
-    toast(modal === 'create' ? 'Template created' : 'Template updated', 'success');
-    setModal(null);
-    setForm(null);
   };
 
-  const deleteTmpl = (id: string) => {
-    if (confirm('Delete template?')) {
-      setTemplates(t => t.filter(x => x.id !== id));
-      toast('Template deleted');
+  const delTmpl = async (id: string) => {
+    if (await confirm({ title: 'Delete Template', message: 'Are you sure you want to delete this template?', danger: true })) {
+      try {
+        await deleteTemplate(id);
+        toast('Template deleted', 'success');
+      } catch (error) {
+        console.error('Error deleting template:', error);
+        toast('Failed to delete template', 'error');
+      }
     }
   };
 
@@ -76,15 +89,15 @@ export function TemplatesPage() {
 
   return (
     <div className="animate-slide-up">
-      <div className="flex items-start gap-3 mb-5">
-        <div className="flex-1">
-          <h1 className="font-serif text-[22px] font-semibold text-gray-900">Task Templates</h1>
-          <p className="text-[13px] text-gray-500 mt-0.5">Reusable workflow templates for compliance tasks</p>
-        </div>
-        <button className="bg-blue-600 hover:bg-blue-700 text-white px-3.5 py-2 rounded-lg text-[13px] font-medium flex items-center gap-1.5 transition-colors" onClick={openCreate}>
-          <Plus size={15} /> New Template
-        </button>
-      </div>
+      <PageHeader 
+        title="Task Templates" 
+        description="Reusable workflow templates for compliance tasks"
+        action={
+          <button className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2.5 rounded-xl text-[14px] font-bold flex items-center gap-2 transition-all shadow-lg shadow-blue-200" onClick={openCreate}>
+            <Plus size={18} /> New Template
+          </button>
+        }
+      />
 
       <div className="flex flex-wrap gap-2 mb-6">
         {CATS.map(c => (
@@ -111,7 +124,7 @@ export function TemplatesPage() {
               </div>
               <div className="flex gap-1 shrink-0 opacity-0 group-hover:opacity-100 transition-opacity">
                 <button className="w-6 h-6 rounded flex items-center justify-center text-gray-400 hover:bg-gray-100 hover:text-gray-900" onClick={() => openEdit(t)}><Edit2 size={12} /></button>
-                <button className="w-6 h-6 rounded flex items-center justify-center text-gray-400 hover:bg-red-50 hover:text-red-600" onClick={() => deleteTmpl(t.id)}><Trash2 size={12} /></button>
+                <button className="w-6 h-6 rounded flex items-center justify-center text-gray-400 hover:bg-red-50 hover:text-red-600" onClick={() => delTmpl(t.id)}><Trash2 size={12} /></button>
               </div>
             </div>
             
@@ -272,6 +285,7 @@ export function TemplatesPage() {
       {isTaskModalOpen && (
         <TaskModal
           task={editingTask}
+          templateId={editingTask?.title ? templates.find(t => t.name === editingTask.title)?.id : undefined}
           onClose={() => setIsTaskModalOpen(false)}
         />
       )}

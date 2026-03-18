@@ -1,8 +1,8 @@
 import React, { useState } from 'react';
 import { useApp } from '../context/AppContext';
 import { useToast } from '../context/ToastContext';
-import { daysLeft, pct, STATUS_COLORS, PRIORITY_COLORS, today, fmt } from '../utils';
-import { Plus, GitMerge } from 'lucide-react';
+import { daysLeft, pct, STATUS_COLORS, PRIORITY_COLORS, today, fmt, canTransition } from '../utils';
+import { Plus, GitMerge, KanbanSquare, Clock, CheckCircle2, AlertCircle } from 'lucide-react';
 import { motion } from 'motion/react';
 import { TypeChip } from '../components/ui/Badges';
 import { Avatar } from '../components/ui/Avatar';
@@ -10,9 +10,10 @@ import { TaskModal } from '../components/ui/TaskModal';
 import { SearchableSelect } from '../components/ui/SearchableSelect';
 import { IconRenderer } from '../components/ui/IconRenderer';
 import { Task } from '../types';
+import { PageHeader } from '../components/ui/PageHeader';
 
 export function KanbanPage() {
-  const { tasks, setTasks, clients, users, taskTypes } = useApp();
+  const { tasks, clients, users, taskTypes, workflows, currentUser, updateTask: persistUpdateTask } = useApp();
   const toast = useToast();
   
   const [dragId, setDragId] = useState<string | null>(null);
@@ -39,14 +40,15 @@ export function KanbanPage() {
         issueType: 'Task',
         status,
         priority: 'Medium',
-        assigneeId: users[0]?.id || '',
-        reporterId: users[0]?.id || '',
+        assigneeId: currentUser?.id || users[0]?.id || '',
+        reporterId: currentUser?.id || users[0]?.id || '',
         reviewerId: '',
         dueDate: fmt(today),
         createdAt: fmt(today),
         recurring: 'One-time',
         description: '',
         tags: [],
+        subtasks: [],
         comments: [],
         attachments: [],
         activity: [{ text: 'Task created', at: fmt(today) }]
@@ -62,41 +64,78 @@ export function KanbanPage() {
     setIsModalOpen(true);
   };
 
-  const updateTask = (id: string, updates: Partial<Task>) => {
-    setTasks(tasks.map(t => t.id === id ? { ...t, ...updates } : t));
-    toast('Task updated', 'success');
+  const updateTask = async (id: string, updates: Partial<Task>) => {
+    if (updates.status) {
+      const task = tasks.find(t => t.id === id);
+      if (task) {
+        const check = canTransition(task, updates.status, taskTypes, workflows);
+        if (!check.allowed) {
+          toast(check.reason || 'Invalid transition', 'error');
+          return;
+        }
+      }
+    }
+    try {
+      await persistUpdateTask(id, updates);
+      toast('Task updated', 'success');
+    } catch (error) {
+      console.error('Error updating task:', error);
+      toast('Failed to update task', 'error');
+    }
   };
 
-  const filtered = tasks.filter(t =>
-    (!filterClient || t.clientId === filterClient) &&
-    (!filterType || t.type === filterType) &&
-    (!filterUser || t.assigneeId === filterUser) &&
-    (!t.parentId || expandedParents.includes(t.parentId))
-  );
+  const filtered = tasks.filter(t => {
+    if (currentUser?.role?.toLowerCase() !== 'admin') {
+      if (t.assigneeId !== currentUser?.id && t.reviewerId !== currentUser?.id) return false;
+    }
+    return (!filterClient || t.clientId === filterClient) &&
+           (!filterType || t.type === filterType) &&
+           (!filterUser || t.assigneeId === filterUser) &&
+           (!t.parentId || expandedParents.includes(t.parentId));
+  });
 
-  const COLS = ['To Do', 'Awaiting Info', 'In Progress', 'Under Review', 'Completed', 'On Hold'];
+  const COLS = Array.from(new Set(workflows.flatMap(w => w.statuses)));
 
-  const drop = (status: string) => {
+  const drop = async (status: string) => {
     if (!dragId || !status) return;
-    setTasks(tasks.map(t => t.id === dragId ? { ...t, status, activity: [{ text: `Moved to ${status}`, at: fmt(today) }, ...(t.activity || [])] } : t));
+    const task = tasks.find(t => t.id === dragId);
+    if (task) {
+      const check = canTransition(task, status, taskTypes, workflows);
+      if (!check.allowed) {
+        toast(check.reason || 'Invalid transition', 'error');
+        setDragId(null);
+        setDragOver(null);
+        return;
+      }
+      try {
+        await persistUpdateTask(dragId, { 
+          status, 
+          activity: [{ text: `Moved to ${status}`, at: fmt(today) }, ...(task.activity || [])] 
+        });
+        toast(`Moved to ${status}`, 'success');
+      } catch (error) {
+        console.error('Error moving task:', error);
+        toast('Failed to move task', 'error');
+      }
+    }
     setDragId(null);
     setDragOver(null);
-    toast(`Moved to ${status}`, 'success');
   };
 
   return (
-    <div className="h-full flex flex-col">
-      <div className="flex items-start gap-3 mb-4 shrink-0">
-        <div className="flex-1">
-          <h1 className="font-serif text-[22px] font-semibold text-gray-900">Kanban Board</h1>
-        </div>
-        <button className="bg-blue-600 hover:bg-blue-700 text-white px-3.5 py-2 rounded-lg text-[13px] font-medium flex items-center gap-1.5 transition-colors" onClick={() => openNewTask()}>
-          <Plus size={15} /> New Task
-        </button>
-      </div>
+    <div className="flex-1 flex flex-col">
+      <PageHeader 
+        title="Kanban Board" 
+        description="Visualize your workflow and track task progress across stages."
+        action={
+          <button className="bg-blue-600 hover:bg-blue-700 text-white px-4 py-2.5 rounded-xl text-[14px] font-bold flex items-center gap-2 transition-all shadow-lg shadow-blue-200" onClick={() => openNewTask()}>
+            <Plus size={18} /> New Task
+          </button>
+        }
+      />
 
       <div className="flex gap-2 items-center flex-wrap mb-4 shrink-0">
-        <div className="w-[200px]">
+        <div className="w-full sm:w-[200px]">
           <SearchableSelect 
             options={[{ value: '', label: 'All Clients' }, ...clients.map(c => ({ value: c.id, label: c.name }))]} 
             value={filterClient} 
@@ -104,7 +143,7 @@ export function KanbanPage() {
             placeholder="All Clients" 
           />
         </div>
-        <div className="w-[160px]">
+        <div className="w-full sm:w-[160px]">
           <SearchableSelect 
             options={[{ value: '', label: 'All Types' }, ...['GST', 'TDS', 'ITR', 'ROC', 'Audit', 'MCA', 'Advance Tax', 'FEMA', 'Labour', 'Other'].map(t => ({ value: t, label: t }))]} 
             value={filterType} 
@@ -112,7 +151,7 @@ export function KanbanPage() {
             placeholder="All Types" 
           />
         </div>
-        <div className="w-[180px]">
+        <div className="w-full sm:w-[180px]">
           <SearchableSelect 
             options={[{ value: '', label: 'All Assignees' }, ...users.map(u => ({ value: u.id, label: u.name }))]} 
             value={filterUser} 
@@ -120,7 +159,7 @@ export function KanbanPage() {
             placeholder="All Assignees" 
           />
         </div>
-        <div className="ml-auto flex items-center gap-2">
+        <div className="ml-auto hidden sm:flex items-center gap-2">
           <button 
             className="text-[12.5px] text-blue-600 hover:text-blue-700 font-medium"
             onClick={() => setExpandedParents(expandedParents.length > 0 ? [] : tasks.filter(t => !t.parentId).map(t => t.id))}
@@ -133,14 +172,14 @@ export function KanbanPage() {
       <div className="flex gap-3.5 overflow-x-auto pb-4 flex-1 custom-scrollbar items-start">
         {COLS.map((col, i) => {
           const colTasks = filtered.filter(t => t.status === col);
-          const [bg, text] = STATUS_COLORS[col];
+          const [bg, text] = STATUS_COLORS[col] || ['#f3f4f6', '#374151'];
           return (
             <motion.div 
               key={col} 
               initial={{ opacity: 0, x: 20 }}
               animate={{ opacity: 1, x: 0 }}
               transition={{ duration: 0.3, delay: i * 0.05 }}
-              className={`w-[260px] shrink-0 flex flex-col bg-gray-50 rounded-xl border-[1.5px] transition-all max-h-full shadow-sm ${dragOver === col ? 'border-blue-600 bg-blue-50/50' : 'border-transparent'}`}
+              className={`w-[85vw] sm:w-[260px] shrink-0 flex flex-col bg-gray-50 rounded-xl border-[1.5px] transition-all max-h-full shadow-sm ${dragOver === col ? 'border-blue-600 bg-blue-50/50' : 'border-transparent'}`}
               onDragOver={e => { e.preventDefault(); setDragOver(col); }}
               onDragLeave={() => setDragOver(null)}
               onDrop={() => drop(col)}
@@ -185,7 +224,7 @@ export function KanbanPage() {
                     <div 
                       key={t.id} 
                       className={`bg-white rounded-lg p-3 border cursor-grab hover:shadow-md hover:-translate-y-[1px] transition-all ${cardBorderClass} ${dragId === t.id ? 'opacity-40' : ''}`}
-                      draggable
+                      draggable={true}
                       onDragStart={() => setDragId(t.id)}
                       onDragEnd={() => { setDragId(null); setDragOver(null); }}
                       onClick={() => openEditTask(t)}
